@@ -99,13 +99,13 @@ def create_voc_dataloaders(base_path, batch_size=8, num_workers=4):
 
     # Create datasets
     train_dataset = VOCSegmentationDataset(
-        root=data_dir,
+        root=os.path.join(data_dir,'VOC2012_train_val/VOC2012_train_val'),
         split='train'
     )
 
     val_dataset = VOCSegmentationDataset(
-        root=data_dir,
-        split='val'
+        root=os.path.join(data_dir,'VOC2012_test/VOC2012_test'),
+        split='test'
     )
 
     # Create dataloaders

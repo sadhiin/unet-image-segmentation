@@ -8,6 +8,7 @@ from pathlib import Path
 from datasets.kitti import create_kitti_dataloaders
 from datasets.citispace import create_cityscapes_dataloaders
 from datasets.pascal_voc import create_voc_dataloaders
+from datasets.coco import create_coco_dataloaders
 from unet import UNet
 from tqdm import tqdm
 import wandb
@@ -116,6 +117,14 @@ def main(args):
         )
         n_classes = 21  # Pascal VOC has 20 classes + background
         criterion = nn.CrossEntropyLoss(ignore_index=255)
+    elif args.dataset.lower()=='coco':
+        train_loader, val_loader, test_loader = create_coco_dataloaders(
+            base_path=args.data_dir,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers
+        )
+        n_classes = 81  # COCO has 80 classes + background
+        criterion = nn.CrossEntropyLoss(ignore_index=255)
 
     else:
         raise ValueError(f"Undefined dataset: {args.dataset}")
@@ -184,7 +193,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Semantic Segmentation Training')
 
     parser.add_argument('--dataset', type=str, default='kitti',
-                   help='Dataset to use (kitti or cityscapes)')
+                    help='Dataset to use (kitti, cityscapes, pascal_voc, or coco)')
     parser.add_argument('--data_dir', type=str, default='data',
                     help='Base directory for datasets')
 

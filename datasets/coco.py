@@ -86,6 +86,8 @@ def create_coco_dataloaders(base_path, batch_size=8, num_workers=4):
             unzip=True
         )
         base_path = os.path.join(base_path,'coco2017')
+    else:
+        base_path = os.path.join(base_path,'coco2017')
     # Define paths
     train_data_dir = os.path.join(base_path, "train2017")
     val_data_dir = os.path.join(base_path, "val2017")

@@ -1,4 +1,5 @@
 from sys import argv
+from sklearn.metrics import pair_confusion_matrix
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -13,29 +14,100 @@ from unet import UNet
 from tqdm import tqdm
 import wandb
 import numpy as np
+from torchmetrics import Dice, JaccardIndex, Precision, Recall, F1Score, ConfusionMatrix
+device ='cuda' if torch.cuda.is_available() else 'cpu'
 
-def calculate_iou(pred, target, n_classes):
-    ious = []
-    pred = pred.view(-1)
-    target = target.view(-1)
+def calculate_metrics(outputs, targets, n_classes):
+    """
+    Calculate evaluation metrics for multiclass image segmentation.
+    Args:
+        outputs (torch.Tensor): Model predictions (B, C, H, W)
+        targets (torch.Tensor): Ground truth labels (B, H, W)
+        n_classes (int): Number of classes
+    Returns:
+        dict: Dictionary containing various metrics
+    """
+    # Move tensors to CPU for metric calculation
+    outputs = outputs.to(torch.device('cpu'))
+    targets = targets.to(torch.device('cpu'))
 
+
+    # Get predictions
+    preds = torch.argmax(outputs, dim=1)
+
+    # Initialize metrics with task='multiclass'
+    dice = Dice(num_classes=n_classes, average='macro')
+    iou = JaccardIndex(task="multiclass", num_classes=n_classes, average='macro')
+    precision = Precision(task="multiclass", num_classes=n_classes, average='macro')
+    recall = Recall(task="multiclass", num_classes=n_classes, average='macro')
+    f1 = F1Score(task="multiclass", num_classes=n_classes, average='macro')
+    confmat = ConfusionMatrix(task="multiclass", num_classes=n_classes)
+
+    # Calculate metrics
+    metrics = {
+        'dice': dice(preds, targets).item(),
+        'iou': iou(preds, targets).item(),
+        'precision': precision(preds, targets).item(),
+        'recall': recall(preds, targets).item(),
+        'f1_score': f1(preds, targets).item(),
+        'confusion_matrix': confmat(preds, targets).cpu().numpy()
+    }
+
+    # Calculate per-class metrics
+    per_class_metrics = {}
     for cls in range(n_classes):
-        pred_inds = pred == cls
-        target_inds = target == cls
-        intersection = (pred_inds & target_inds).sum().float()
-        union = (pred_inds | target_inds).sum().float()
+        cls_preds = (preds == cls)
+        cls_targets = (targets == cls)
 
-        if union == 0:
-            ious.append(float('nan'))
-        else:
-            ious.append(float(intersection / union))
+        # Skip if class not present in ground truth
+        if not cls_targets.any():
+            continue
 
-    return np.nanmean(ious)
+        cls_dice = Dice(average='micro')(cls_preds, cls_targets).item()
+        cls_iou = JaccardIndex(task="binary")(cls_preds, cls_targets).item()
 
-def train_one_epoch(model, loader, criterion, optimizer, device):
+        per_class_metrics[f'class_{cls}_dice'] = cls_dice
+        per_class_metrics[f'class_{cls}_iou'] = cls_iou
+
+    metrics.update(per_class_metrics)
+    return metrics
+
+def validate(model, loader, criterion, device, n_classes):
+    model.eval()
+    total_loss = 0
+    all_metrics = []
+
+    with torch.no_grad():
+        for images, masks in loader:
+            images = images.to(device)
+            masks = masks.to(device)
+
+            outputs = model(images)
+            loss = criterion(outputs, masks)
+
+            # Calculate metrics
+            batch_metrics = calculate_metrics(outputs, masks, n_classes)
+            all_metrics.append(batch_metrics)
+
+            total_loss += loss.item()
+
+    # Average metrics across batches
+    avg_metrics = {}
+    n_batches = len(all_metrics)
+
+    for metric in all_metrics[0].keys():
+        if metric != 'confusion_matrix':
+            avg_metrics[metric] = sum(m[metric] for m in all_metrics) / n_batches
+
+    # Sum confusion matrices
+    avg_metrics['confusion_matrix'] = sum(m['confusion_matrix'] for m in all_metrics)
+
+    return total_loss / len(loader), avg_metrics
+
+def train_one_epoch(model, loader, criterion, optimizer, device, n_classes):
     model.train()
     total_loss = 0
-    total_iou = 0
+    all_metrics = []
 
     with tqdm(loader) as pbar:
         for images, masks in pbar:
@@ -49,37 +121,31 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
             loss.backward()
             optimizer.step()
 
-            # Calculate IoU
-            preds = torch.argmax(outputs, dim=1)
-            iou = calculate_iou(preds, masks, model.n_classes)
+            # Calculate metrics
+            batch_metrics = calculate_metrics(outputs, masks, n_classes)
+            all_metrics.append(batch_metrics)
 
             total_loss += loss.item()
-            total_iou += iou
 
-            pbar.set_postfix({'loss': loss.item(), 'iou': iou})
+            # Update progress bar
+            pbar.set_postfix({
+                'loss': loss.item(),
+                'dice': batch_metrics['dice'],
+                'iou': batch_metrics['iou']
+            })
 
-    return total_loss / len(loader), total_iou / len(loader)
+    # Average metrics across batches
+    avg_metrics = {}
+    n_batches = len(all_metrics)
 
-def validate(model, loader, criterion, device):
-    model.eval()
-    total_loss = 0
-    total_iou = 0
+    for metric in all_metrics[0].keys():
+        if metric != 'confusion_matrix':
+            avg_metrics[metric] = sum(m[metric] for m in all_metrics) / n_batches
 
-    with torch.no_grad():
-        for images, masks in loader:
-            images = images.to(device)
-            masks = masks.to(device)
+    # Sum confusion matrices
+    avg_metrics['confusion_matrix'] = sum(m['confusion_matrix'] for m in all_metrics)
 
-            outputs = model(images)
-            loss = criterion(outputs, masks)
-
-            preds = torch.argmax(outputs, dim=1)
-            iou = calculate_iou(preds, masks, model.n_classes)
-
-            total_loss += loss.item()
-            total_iou += iou
-
-    return total_loss / len(loader), total_iou / len(loader)
+    return total_loss / len(loader), avg_metrics
 
 def main(args):
     # Setup device
@@ -147,47 +213,65 @@ def main(args):
         print(f"\nEpoch {epoch+1}/{args.epochs}")
 
         # Train
-        train_loss, train_iou = train_one_epoch(
-            model, train_loader, criterion, optimizer, device
+        train_loss, train_metrics = train_one_epoch(
+            model, train_loader, criterion, optimizer, device, n_classes
         )
 
         # Validate
-        val_loss, val_iou = validate(model, val_loader, criterion, device)
+        val_loss, val_metrics = validate(
+            model, val_loader, criterion, device, n_classes
+        )
 
         # Update learning rate
         scheduler.step(val_loss)
 
-        print(f"Train Loss: {train_loss:.4f}, Train IoU: {train_iou:.4f}")
-        print(f"Val Loss: {val_loss:.4f}, Val IoU: {val_iou:.4f}")
+        # Print metrics
+        print(f"Train Loss: {train_loss:.4f}")
+        print(f"Train Metrics: Dice={train_metrics['dice']:.4f}, "
+              f"IoU={train_metrics['iou']:.4f}, "
+              f"F1={train_metrics['f1_score']:.4f}")
+        print(f"Val Loss: {val_loss:.4f}")
+        print(f"Val Metrics: Dice={val_metrics['dice']:.4f}, "
+              f"IoU={val_metrics['iou']:.4f}, "
+              f"F1={val_metrics['f1_score']:.4f}")
 
         if args.use_wandb:
+            # Log metrics to wandb
             wandb.log({
                 'epoch': epoch,
                 'train_loss': train_loss,
-                'train_iou': train_iou,
                 'val_loss': val_loss,
-                'val_iou': val_iou,
+                **{f'train_{k}': v for k, v in train_metrics.items() if k != 'confusion_matrix'},
+                **{f'val_{k}': v for k, v in val_metrics.items() if k != 'confusion_matrix'},
                 'lr': optimizer.param_groups[0]['lr']
             })
 
+            # Log confusion matrices as images
+            wandb.log({
+                'train_confusion_matrix': wandb.Image(
+                    plot_confusion_matrix(train_metrics['confusion_matrix'])
+                ),
+                'val_confusion_matrix': wandb.Image(
+                    pair_confusion_matrix(val_metrics['confusion_matrix'])
+                )
+            })
+
         # Save best model
-        if val_iou > best_val_iou:
-            best_val_iou = val_iou
+        if val_metrics['iou'] > best_val_iou:
+            best_val_iou = val_metrics['iou']
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'val_iou': val_iou,
+                'val_iou': val_metrics['iou'],
             }, Path(args.checkpoint_dir) / f'{args.dataset}-best_model.pth')
-
-
 
     # Test best model
     model.load_state_dict(torch.load(Path(args.checkpoint_dir) / f'{args.dataset}-best_model.pth')['model_state_dict'])
-    test_loss, test_iou = validate(model, test_loader, criterion, device)
-    wandb.log({'test_loss': test_loss, 'test_iou': test_iou})
+    test_loss, test_metrics = validate(model, test_loader, criterion, device, n_classes)
+    wandb.log({'test_loss': test_loss, 'test_iou': test_metrics['iou']})
     wandb.finish()
-    print(f"\nTest Loss: {test_loss:.4f}, Test IoU: {test_iou:.4f}")
+    print(f"\nTest Loss: {test_loss:.4f}, Test IoU: {test_metrics['iou']:.4f}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Semantic Segmentation Training')

@@ -17,7 +17,7 @@ class SegmentationVisualizer:
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
         # Validate dataset name
-        if self.dataset_name not in ['coco', 'pascal_voc', 'cityscapes', 'kitti']:
+        if self.dataset_name not in ['coco', 'pascal_voc', 'cityscapes', 'kitti', 'spacenet']:
             raise ValueError(f"Unsupported dataset: {dataset_name}")
 
         # Define color maps for different datasets
@@ -25,7 +25,8 @@ class SegmentationVisualizer:
             'coco': 'tab20',
             'pascal_voc': 'tab20',
             'cityscapes': 'tab20',
-            'kitti': 'tab20'
+            'kitti': 'tab20',
+            'spacenet': 'binary'
         }
 
         # Define normalization parameters for different datasets
@@ -33,7 +34,8 @@ class SegmentationVisualizer:
             'coco': {'mean': [0.485, 0.456, 0.406], 'std': [0.229, 0.224, 0.225]},
             'pascal_voc': {'mean': [0.485, 0.456, 0.406], 'std': [0.229, 0.224, 0.225]},
             'cityscapes': {'mean': [0.485, 0.456, 0.406], 'std': [0.229, 0.224, 0.225]},
-            'kitti': {'mean': [0.485, 0.456, 0.406], 'std': [0.229, 0.224, 0.225]}
+            'kitti': {'mean': [0.485, 0.456, 0.406], 'std': [0.229, 0.224, 0.225]},
+            'spacenet': {'mean': [0.485, 0.456, 0.406], 'std': [0.229, 0.224, 0.225]}
         }
 
     def denormalize_image(self, image):
@@ -84,21 +86,29 @@ class SegmentationVisualizer:
                                     figsize=(15, 5))
 
                 # Plot original image
-                img = images[i].permute(1, 2, 0)  # Ensure shape is (H, W, C) for plotting
-                img = self.denormalize_image(img.permute(2, 0, 1))  # Convert back to (C, H, W) for denormalization
-                img = img.permute(1, 2, 0)  # Convert back to (H, W, C) for plotting
+                img = images[i].permute(1, 2, 0)  # (C,H,W) -> (H,W,C)
+                img = self.denormalize_image(img.permute(2, 0, 1))  # Denormalize
+                img = img.permute(1, 2, 0).numpy()  # Convert to numpy for plotting
                 axes[0].imshow(img)
                 axes[0].set_title('Original Image')
                 axes[0].axis('off')
 
                 # Plot ground truth mask
-                axes[1].imshow(masks[i], cmap=self.color_maps[self.dataset_name])
+                mask = masks[i].numpy()
+                if self.dataset_name == 'spacenet':
+                    axes[1].imshow(mask, cmap='binary')
+                else:
+                    axes[1].imshow(mask, cmap=self.color_maps[self.dataset_name])
                 axes[1].set_title('Ground Truth Mask')
                 axes[1].axis('off')
 
                 # Plot prediction if available
                 if predictions is not None:
-                    axes[2].imshow(predictions[i], cmap=self.color_maps[self.dataset_name])
+                    pred = predictions[i].numpy()
+                    if self.dataset_name == 'spacenet':
+                        axes[2].imshow(pred, cmap='binary')
+                    else:
+                        axes[2].imshow(pred, cmap=self.color_maps[self.dataset_name])
                     axes[2].set_title('Predicted Mask')
                     axes[2].axis('off')
 

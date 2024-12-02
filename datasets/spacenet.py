@@ -10,6 +10,7 @@ from torchvision import transforms
 from PIL import Image
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
+import rasterio
 
 class SpaceNetDataset(Dataset):
     def __init__(self, files, crop_size=256, transform=None, is_train=True):
@@ -85,9 +86,17 @@ class SpaceNetDataset(Dataset):
         return (image / np.iinfo(image.dtype).max).astype(np.float32)
 
     def _load_mask(self, idx):
-        """Load and binarize mask"""
-        mask = io.imread(self.files[idx]['mask'])
-        return np.where(mask == 255, 1, 0).astype(np.uint8)
+        """Load and binarize mask using rasterio"""
+        try:
+            with rasterio.open(self.files[idx]['mask']) as src:
+                mask = src.read(1)  # Read first band
+                # Ensure mask is properly oriented
+                if src.transform.e > 0:  # Check if we need to flip vertically
+                    mask = np.flipud(mask)
+                return np.where(mask > 0, 1, 0).astype(np.uint8)
+        except Exception as e:
+            print(f"Error loading mask {self.files[idx]['mask']}: {str(e)}")
+            return np.zeros((self.crop_size, self.crop_size), dtype=np.uint8)
 
     def _random_crop(self, image, mask, size=None):
         """Random crop both image and mask"""

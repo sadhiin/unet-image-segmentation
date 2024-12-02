@@ -25,6 +25,10 @@ class CocoSegmentationDataset(Dataset):
         # Category id to continuous id mapping
         self.continuous_cat_id = {v['id']: i + 1 for i, v in enumerate(self.categories)}
 
+        # Create mask directory if it doesn't exist
+        self.mask_dir = os.path.join(os.path.dirname(root_dir), 'masks')
+        os.makedirs(self.mask_dir, exist_ok=True)
+
     def _default_transform(self):
         return transforms.Compose([
             transforms.ToTensor(),
@@ -32,21 +36,14 @@ class CocoSegmentationDataset(Dataset):
                               std=[0.229, 0.224, 0.225])
         ])
 
-    def __getitem__(self, index):
-        # Load image
-        img_id = self.ids[index]
-        img_metadata = self.coco.loadImgs(img_id)[0]
-        image = Image.open(os.path.join(self.root_dir, img_metadata['file_name']))
-
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
+    def _generate_and_save_mask(self, img_id, height, width):
+        """Generate mask and save it to disk"""
+        # Create empty mask
+        mask = np.zeros((height, width))
 
         # Get all annotations for this image
         annot_ids = self.coco.getAnnIds(imgIds=img_id)
         annotations = self.coco.loadAnns(annot_ids)
-
-        # Create empty mask
-        mask = np.zeros((img_metadata['height'], img_metadata['width']))
 
         # Fill mask with instance segmentations
         for annotation in annotations:
@@ -57,6 +54,41 @@ class CocoSegmentationDataset(Dataset):
             # Get segmentation mask for this instance
             seg_mask = self.coco.annToMask(annotation)
             mask[seg_mask > 0] = class_id
+
+        # Save mask to file
+        mask_path = os.path.join(self.mask_dir, f'{img_id}.npy')
+        np.save(mask_path, mask)
+
+        return mask
+
+    def _load_or_generate_mask(self, img_id, height, width):
+        """Load mask from cache if it exists, otherwise generate and cache it"""
+        mask_path = os.path.join(self.mask_dir, f'{img_id}.npy')
+
+        if os.path.exists(mask_path):
+            # Load cached mask
+            mask = np.load(mask_path)
+        else:
+            # Generate and cache mask
+            mask = self._generate_and_save_mask(img_id, height, width)
+
+        return mask
+
+    def __getitem__(self, index):
+        # Load image
+        img_id = self.ids[index]
+        img_metadata = self.coco.loadImgs(img_id)[0]
+        image = Image.open(os.path.join(self.root_dir, img_metadata['file_name']))
+
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+
+        # Load or generate mask
+        mask = self._load_or_generate_mask(
+            img_id,
+            img_metadata['height'],
+            img_metadata['width']
+        )
 
         # Resize to fixed size
         image = image.resize((256, 256), Image.BILINEAR)

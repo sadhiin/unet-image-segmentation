@@ -1,3 +1,4 @@
+from asyncio import tasks
 from sys import argv
 from sklearn.metrics import pair_confusion_matrix
 import torch
@@ -15,6 +16,7 @@ from tqdm import tqdm
 import wandb
 import numpy as np
 from torchmetrics import Dice, JaccardIndex, Precision, Recall, F1Score, ConfusionMatrix
+from utils.visualization import SegmentationVisualizer
 device ='cuda' if torch.cuda.is_available() else 'cpu'
 
 def calculate_metrics(outputs, targets, n_classes):
@@ -72,13 +74,13 @@ def calculate_metrics(outputs, targets, n_classes):
     metrics.update(per_class_metrics)
     return metrics
 
-def validate(model, loader, criterion, device, n_classes):
+def validate(model, loader, criterion, device, n_classes, visualizer, epoch):
     model.eval()
     total_loss = 0
     all_metrics = []
 
     with torch.no_grad():
-        for images, masks in loader:
+        for batch_idx, (images, masks) in enumerate(loader):
             images = images.to(device)
             masks = masks.to(device)
 
@@ -90,6 +92,11 @@ def validate(model, loader, criterion, device, n_classes):
             all_metrics.append(batch_metrics)
 
             total_loss += loss.item()
+
+            # Visualize first batch
+            if batch_idx == 0:
+                visualizer.visualize_batch(images, masks, outputs,
+                                        phase='val', batch_idx=epoch)
 
     # Average metrics across batches
     avg_metrics = {}
@@ -104,13 +111,13 @@ def validate(model, loader, criterion, device, n_classes):
 
     return total_loss / len(loader), avg_metrics
 
-def train_one_epoch(model, loader, criterion, optimizer, device, n_classes):
+def train_one_epoch(model, loader, criterion, optimizer, device, n_classes, visualizer, epoch):
     model.train()
     total_loss = 0
     all_metrics = []
 
     with tqdm(loader) as pbar:
-        for images, masks in pbar:
+        for batch_idx, (images, masks) in enumerate(pbar):
             images = images.to(device)
             masks = masks.to(device)
 
@@ -134,6 +141,11 @@ def train_one_epoch(model, loader, criterion, optimizer, device, n_classes):
                 'iou': batch_metrics['iou']
             })
 
+            # Visualize first batch of each epoch
+            if batch_idx == 0:
+                visualizer.visualize_batch(images, masks, outputs,
+                                        phase='train', batch_idx=epoch)
+
     # Average metrics across batches
     avg_metrics = {}
     n_batches = len(all_metrics)
@@ -147,14 +159,39 @@ def train_one_epoch(model, loader, criterion, optimizer, device, n_classes):
 
     return total_loss / len(loader), avg_metrics
 
-def main(args):
-    # Setup device
-    device ='cuda' if torch.cuda.is_available() else 'cpu'
+def plot_confusion_matrix(confusion_matrix, title='Confusion Matrix'):
+    """Plot confusion matrix using matplotlib."""
+    import matplotlib.pyplot as plt
+    import seaborn as sns
 
-    # Initialize wandb
+    fig, ax = plt.subplots(figsize=(10, 8))
+    sns.heatmap(confusion_matrix, annot=True, fmt='d', cmap='Blues', ax=ax)
+    ax.set_title(title)
+    ax.set_xlabel('Predicted')
+    ax.set_ylabel('True')
+    plt.close(fig)
+    return fig
+
+def main(args):
+    # Setup device and WandB
     if args.use_wandb:
         wandb.login()
-        wandb.init(project=f"Unet-semantic-segmentation", config=args)
+        # Enhanced WandB config
+        wandb_config = {
+            **vars(args),
+            'device': device,
+            'model_type': 'UNet',
+            'optimizer': 'Adam',
+            'scheduler': 'ReduceLROnPlateau',
+            'dataset_classes': n_classes,
+        }
+        wandb.init(
+            project=f"Unet-semantic-segmentation",
+            name=f"{args.dataset}-{wandb.util.generate_id()}",
+            config=wandb_config
+        )
+        # Log model architecture
+        wandb.watch(model, log='all', log_freq=100)
 
     # Create datasets based on dataset choice
     if args.dataset.lower() == 'kitti':
@@ -207,6 +244,9 @@ def main(args):
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5)
 
+    # Initialize visualizer
+    visualizer = SegmentationVisualizer(args.dataset)
+
     # Training loop
     best_val_iou = 0
     for epoch in range(args.epochs):
@@ -214,63 +254,131 @@ def main(args):
 
         # Train
         train_loss, train_metrics = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, n_classes
+            model, train_loader, criterion, optimizer, device, n_classes,
+            visualizer, epoch
         )
 
         # Validate
         val_loss, val_metrics = validate(
-            model, val_loader, criterion, device, n_classes
+            model, val_loader, criterion, device, n_classes,
+            visualizer, epoch
         )
 
         # Update learning rate
+        current_lr = optimizer.param_groups[0]['lr']
         scheduler.step(val_loss)
 
-        # Print metrics
-        print(f"Train Loss: {train_loss:.4f}")
-        print(f"Train Metrics: Dice={train_metrics['dice']:.4f}, "
-              f"IoU={train_metrics['iou']:.4f}, "
-              f"F1={train_metrics['f1_score']:.4f}")
-        print(f"Val Loss: {val_loss:.4f}")
-        print(f"Val Metrics: Dice={val_metrics['dice']:.4f}, "
-              f"IoU={val_metrics['iou']:.4f}, "
-              f"F1={val_metrics['f1_score']:.4f}")
-
         if args.use_wandb:
-            # Log metrics to wandb
+            # Enhanced metrics logging
             wandb.log({
                 'epoch': epoch,
-                'train_loss': train_loss,
-                'val_loss': val_loss,
-                **{f'train_{k}': v for k, v in train_metrics.items() if k != 'confusion_matrix'},
-                **{f'val_{k}': v for k, v in val_metrics.items() if k != 'confusion_matrix'},
-                'lr': optimizer.param_groups[0]['lr']
+                'learning_rate': current_lr,
+
+                # Loss metrics
+                'train/loss': train_loss,
+                'val/loss': val_loss,
+
+                # Training metrics
+                **{f'train/metrics/{k}': v for k, v in train_metrics.items()
+                   if k != 'confusion_matrix'},
+
+                # Validation metrics
+                **{f'val/metrics/{k}': v for k, v in val_metrics.items()
+                   if k != 'confusion_matrix'},
+
+                # Per-class metrics (if available)
+                **{f'train/class_metrics/{k}': v for k, v in train_metrics.items()
+                   if k.startswith('class_')},
+                **{f'val/class_metrics/{k}': v for k, v in val_metrics.items()
+                   if k.startswith('class_')},
+
+                # Learning rate
+                'train/learning_rate': current_lr,
             })
 
-            # Log confusion matrices as images
+            # Log confusion matrices and visualizations
             wandb.log({
-                'train_confusion_matrix': wandb.Image(
-                    plot_confusion_matrix(train_metrics['confusion_matrix'])
+                'train/confusion_matrix': wandb.Image(
+                    plot_confusion_matrix(
+                        train_metrics['confusion_matrix'],
+                        title=f'Train Confusion Matrix - Epoch {epoch}'
+                    )
                 ),
-                'val_confusion_matrix': wandb.Image(
-                    pair_confusion_matrix(val_metrics['confusion_matrix'])
-                )
+                'val/confusion_matrix': wandb.Image(
+                    plot_confusion_matrix(
+                        val_metrics['confusion_matrix'],
+                        title=f'Val Confusion Matrix - Epoch {epoch}'
+                    )
+                ),
+                'train/samples': [wandb.Image(str(p)) for p in (visualizer.base_dir / 'train').glob('*.png')],
+                'val/samples': [wandb.Image(str(p)) for p in (visualizer.base_dir / 'val').glob('*.png')]
             })
 
-        # Save best model
+        # Save best model with more information
         if val_metrics['iou'] > best_val_iou:
             best_val_iou = val_metrics['iou']
-            torch.save({
+            checkpoint = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
                 'val_iou': val_metrics['iou'],
-            }, Path(args.checkpoint_dir) / f'{args.dataset}-best_model.pth')
+                'val_dice': val_metrics['dice'],
+                'val_loss': val_loss,
+                'train_loss': train_loss,
+                'args': vars(args)
+            }
+            save_path = Path(args.checkpoint_dir) / f'{args.dataset}-best_model.pth'
+            torch.save(checkpoint, save_path)
+
+            if args.use_wandb:
+                wandb.log({
+                    'best_model/epoch': epoch,
+                    'best_model/val_iou': val_metrics['iou'],
+                    'best_model/val_dice': val_metrics['dice'],
+                    'best_model/val_loss': val_loss
+                })
+                # Save best model to wandb
+                wandb.save(str(save_path))
 
     # Test best model
     model.load_state_dict(torch.load(Path(args.checkpoint_dir) / f'{args.dataset}-best_model.pth')['model_state_dict'])
-    test_loss, test_metrics = validate(model, test_loader, criterion, device, n_classes)
-    wandb.log({'test_loss': test_loss, 'test_iou': test_metrics['iou']})
-    wandb.finish()
+    test_loss, test_metrics = validate(model, test_loader, criterion, device, n_classes, visualizer, epoch='final')
+
+    if args.use_wandb:
+        # Log test results
+        wandb.log({
+            'test/loss': test_loss,
+            **{f'test/metrics/{k}': v for k, v in test_metrics.items()
+               if k != 'confusion_matrix'},
+            **{f'test/class_metrics/{k}': v for k, v in test_metrics.items()
+               if k.startswith('class_')},
+            'test/confusion_matrix': wandb.Image(
+                plot_confusion_matrix(
+                    test_metrics['confusion_matrix'],
+                    title='Test Confusion Matrix'
+                )
+            )
+        })
+
+        # Log test visualizations
+        test_viz_paths = list(Path('visualizations') / args.dataset / 'test').glob('*.png')
+        wandb.log({
+            'test/samples': [wandb.Image(str(p)) for p in test_viz_paths]
+        })
+
+        # Log final summary metrics
+        wandb.run.summary.update({
+            'best_val_iou': best_val_iou,
+            'final_test_loss': test_loss,
+            'final_test_iou': test_metrics['iou'],
+            'final_test_dice': test_metrics['dice'],
+            'total_epochs': args.epochs,
+            'total_parameters': sum(p.numel() for p in model.parameters())
+        })
+
+        wandb.finish()
+
     print(f"\nTest Loss: {test_loss:.4f}, Test IoU: {test_metrics['iou']:.4f}")
 
 if __name__ == "__main__":

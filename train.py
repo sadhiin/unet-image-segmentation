@@ -11,6 +11,7 @@ from datasets.kitti import create_kitti_dataloaders
 from datasets.citispace import create_cityscapes_dataloaders
 from datasets.pascal_voc import create_voc_dataloaders
 from datasets.coco import create_coco_dataloaders
+from datasets.spacenet import create_spacenet_dataloaders
 from unet import UNet
 from tqdm import tqdm
 import wandb
@@ -173,27 +174,7 @@ def plot_confusion_matrix(confusion_matrix, title='Confusion Matrix'):
     return fig
 
 def main(args):
-    # Setup device and WandB
-    if args.use_wandb:
-        wandb.login()
-        # Enhanced WandB config
-        wandb_config = {
-            **vars(args),
-            'device': device,
-            'model_type': 'UNet',
-            'optimizer': 'Adam',
-            'scheduler': 'ReduceLROnPlateau',
-            'dataset_classes': n_classes,
-        }
-        wandb.init(
-            project=f"Unet-semantic-segmentation",
-            name=f"{args.dataset}-{wandb.util.generate_id()}",
-            config=wandb_config
-        )
-        # Log model architecture
-        wandb.watch(model, log='all', log_freq=100)
-
-    # Create datasets based on dataset choice
+    # Create datasets based on dataset choice first to get n_classes
     if args.dataset.lower() == 'kitti':
         train_loader, val_loader, test_loader = create_kitti_dataloaders(
             base_path=args.data_dir,
@@ -210,7 +191,7 @@ def main(args):
             num_workers=args.num_workers
         )
         n_classes = 21  # Cityscapes classes
-        criterion = nn.CrossEntropyLoss(ignore_index=255)  # 255 is typically used for ignored labels
+        criterion = nn.CrossEntropyLoss(ignore_index=255)
 
     elif args.dataset.lower() == 'pascal_voc':
         train_loader, val_loader, test_loader = create_voc_dataloaders(
@@ -220,7 +201,8 @@ def main(args):
         )
         n_classes = 21  # Pascal VOC has 20 classes + background
         criterion = nn.CrossEntropyLoss(ignore_index=255)
-    elif args.dataset.lower()=='coco':
+
+    elif args.dataset.lower() == 'coco':
         train_loader, val_loader, test_loader = create_coco_dataloaders(
             base_path=args.data_dir,
             batch_size=args.batch_size,
@@ -229,16 +211,45 @@ def main(args):
         n_classes = 81  # COCO has 80 classes + background
         criterion = nn.CrossEntropyLoss(ignore_index=255)
 
+    elif args.dataset.lower() == 'spacenet':
+        train_loader, val_loader, test_loader = create_spacenet_dataloaders(
+            base_path=args.data_dir,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers
+        )
+        n_classes = 2  # Binary segmentation for buildings
+        criterion = nn.BCEWithLogitsLoss()  # Better for binary segmentation
+
     else:
         raise ValueError(f"Undefined dataset: {args.dataset}")
 
-    in_channels = 3
-
+    # Setup device and WandB after n_classes is defined
+    if args.use_wandb:
+        wandb.login()
+        # Enhanced WandB config
+        wandb_config = {
+            **vars(args),
+            'device': device,
+            'model_type': 'UNet',
+            'optimizer': 'Adam',
+            'scheduler': 'ReduceLROnPlateau',
+            'dataset_classes': n_classes,
+        }
+        wandb.init(
+            project=f"Unet-semantic-segmentation",
+            name=f"{args.dataset}-{wandb.util.generate_id()}",
+            config=wandb_config
+        )
 
     # Initialize model with appropriate number of classes
-    model = UNet(n_channels=in_channels, n_classes=n_classes).to(device)
+    model = UNet(n_channels=3, n_classes=n_classes).to(device)
     print("Model: \n")
     print(model)
+
+    if args.use_wandb:
+        # Log model architecture
+        wandb.watch(model, log='all', log_freq=100)
+
     # Loss function and optimizer
 
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
@@ -384,8 +395,8 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Semantic Segmentation Training')
 
-    parser.add_argument('--dataset', type=str, default='kitti',
-                    help='Dataset to use (kitti, cityscapes, pascal_voc, or coco)')
+    parser.add_argument('--dataset', type=str, default='cityscapes',
+                help='Dataset to use (kitti, cityscapes, pascal_voc, coco, or spacenet)')
     parser.add_argument('--data_dir', type=str, default='data',
                     help='Base directory for datasets')
 

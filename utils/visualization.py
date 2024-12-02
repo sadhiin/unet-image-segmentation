@@ -42,11 +42,15 @@ class SegmentationVisualizer:
             raise TypeError("Image must be a torch.Tensor")
 
         norm_params = self.norm_params[self.dataset_name]
-        return TF.normalize(
-            image,
-            mean=[-m/s for m, s in zip(norm_params['mean'], norm_params['std'])],
-            std=[1/s for s in norm_params['std']]
-        )
+        # Ensure the image tensor is in the correct shape (C, H, W)
+        if image.ndim == 3 and image.shape[0] == 3:
+            return TF.normalize(
+                image,
+                mean=[-m/s for m, s in zip(norm_params['mean'], norm_params['std'])],
+                std=[1/s for s in norm_params['std']]
+            )
+        else:
+            raise ValueError(f"Expected image tensor of shape (3, H, W), but got {image.shape}")
 
     def visualize_batch(self, images, masks, predictions=None, phase='train', batch_idx=0, max_samples=4):
         """
@@ -77,11 +81,12 @@ class SegmentationVisualizer:
             for i in range(min(images.shape[0], max_samples)):
                 # Create figure
                 fig, axes = plt.subplots(1, 3 if predictions is not None else 2,
-                                       figsize=(15, 5))
+                                    figsize=(15, 5))
 
                 # Plot original image
-                img = images[i].permute(1, 2, 0)
-                img = self.denormalize_image(img)
+                img = images[i].permute(1, 2, 0)  # Ensure shape is (H, W, C) for plotting
+                img = self.denormalize_image(img.permute(2, 0, 1))  # Convert back to (C, H, W) for denormalization
+                img = img.permute(1, 2, 0)  # Convert back to (H, W, C) for plotting
                 axes[0].imshow(img)
                 axes[0].set_title('Original Image')
                 axes[0].axis('off')

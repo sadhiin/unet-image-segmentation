@@ -1,5 +1,6 @@
 from asyncio import tasks
 from sys import argv
+from seaborn import load_dataset
 from sklearn.metrics import pair_confusion_matrix
 import torch
 import torch.nn as nn
@@ -21,144 +22,185 @@ from utils.visualization import SegmentationVisualizer
 device ='cuda' if torch.cuda.is_available() else 'cpu'
 
 def calculate_metrics(outputs, targets, n_classes):
-    """
-    Calculate evaluation metrics for multiclass image segmentation.
-    Args:
-        outputs (torch.Tensor): Model predictions (B, C, H, W)
-        targets (torch.Tensor): Ground truth labels (B, H, W)
-        n_classes (int): Number of classes
-    Returns:
-        dict: Dictionary containing various metrics
-    """
-    # Move tensors to CPU for metric calculation
-    outputs = outputs.to(torch.device('cpu'))
-    targets = targets.to(torch.device('cpu'))
+    """Calculate segmentation metrics including per-class metrics"""
+    # Convert outputs to predictions
+    predictions = torch.argmax(outputs, dim=1)
 
+    # Initialize metrics dictionary
+    metrics = {}
 
-    # Get predictions
-    preds = torch.argmax(outputs, dim=1)
+    # Calculate confusion matrix
+    conf_matrix = torch.zeros((n_classes, n_classes), device=predictions.device)
+    for t, p in zip(targets.view(-1), predictions.view(-1)):
+        conf_matrix[t.long(), p.long()] += 1
+    metrics['confusion_matrix'] = conf_matrix.cpu().numpy()
 
-    # Initialize metrics with task='multiclass'
-    dice = Dice(num_classes=n_classes, average='macro')
-    iou = JaccardIndex(task="multiclass", num_classes=n_classes, average='macro')
-    precision = Precision(task="multiclass", num_classes=n_classes, average='macro')
-    recall = Recall(task="multiclass", num_classes=n_classes, average='macro')
-    f1 = F1Score(task="multiclass", num_classes=n_classes, average='macro')
-    confmat = ConfusionMatrix(task="multiclass", num_classes=n_classes)
+    # Calculate IoU and Dice for each class
+    for class_id in range(n_classes):
+        # Create binary masks for current class
+        pred_mask = (predictions == class_id)
+        target_mask = (targets == class_id)
 
-    # Calculate metrics
-    metrics = {
-        'dice': dice(preds, targets).item(),
-        'iou': iou(preds, targets).item(),
-        'precision': precision(preds, targets).item(),
-        'recall': recall(preds, targets).item(),
-        'f1_score': f1(preds, targets).item(),
-        'confusion_matrix': confmat(preds, targets).cpu().numpy()
-    }
+        # Calculate intersection and union
+        intersection = torch.logical_and(pred_mask, target_mask).sum().item()
+        union = torch.logical_or(pred_mask, target_mask).sum().item()
 
-    # Calculate per-class metrics
-    per_class_metrics = {}
-    for cls in range(n_classes):
-        cls_preds = (preds == cls)
-        cls_targets = (targets == cls)
+        # Calculate IoU
+        iou = intersection / (union + 1e-10)
+        metrics[f'class_{class_id}_iou'] = iou
 
-        # Skip if class not present in ground truth
-        if not cls_targets.any():
-            continue
+        # Calculate Dice
+        dice = 2 * intersection / (pred_mask.sum().item() + target_mask.sum().item() + 1e-10)
+        metrics[f'class_{class_id}_dice'] = dice
 
-        cls_dice = Dice(average='micro')(cls_preds, cls_targets).item()
-        cls_iou = JaccardIndex(task="binary")(cls_preds, cls_targets).item()
+    # Calculate mean metrics
+    class_ious = [v for k, v in metrics.items() if k.endswith('_iou')]
+    class_dices = [v for k, v in metrics.items() if k.endswith('_dice')]
 
-        per_class_metrics[f'class_{cls}_dice'] = cls_dice
-        per_class_metrics[f'class_{cls}_iou'] = cls_iou
+    metrics['iou'] = np.mean(class_ious)
+    metrics['dice'] = np.mean(class_dices)
 
-    metrics.update(per_class_metrics)
     return metrics
 
-def validate(model, loader, criterion, device, n_classes, visualizer, epoch):
+def validate(model, val_loader, criterion, device, n_classes, visualizer, epoch):
+    """
+    Validate model
+    Args:
+        model: The neural network model
+        val_loader: DataLoader for validation data
+        criterion: Loss function
+        device: Device to validate on (cuda/cpu)
+        n_classes: Number of classes
+        visualizer: SegmentationVisualizer instance
+        epoch: Current epoch number
+    """
     model.eval()
-    total_loss = 0
+    running_loss = 0.0
     all_metrics = []
+    n_batches = len(val_loader)
+
+    sample_images = None
+    sample_masks = None
+    sample_outputs = None
 
     with torch.no_grad():
-        for batch_idx, (images, masks) in enumerate(loader):
+        for batch_idx, (images, masks) in enumerate(val_loader):
             images = images.to(device)
             masks = masks.to(device)
 
             outputs = model(images)
             loss = criterion(outputs, masks)
 
-            # Calculate metrics
-            batch_metrics = calculate_metrics(outputs, masks, n_classes)
-            all_metrics.append(batch_metrics)
+            metrics = calculate_metrics(outputs, masks, n_classes)
+            all_metrics.append(metrics)
 
-            total_loss += loss.item()
+            running_loss += loss.item()
 
-            # Visualize first batch
             if batch_idx == 0:
-                visualizer.visualize_batch(images, masks, outputs,
-                                        phase='val', batch_idx=epoch)
+                sample_images = images.detach().cpu()
+                sample_masks = masks.detach().cpu()
+                sample_outputs = outputs.detach().cpu()
+                visualizer.visualize_batch(images, masks, outputs, phase='val', batch_idx=epoch)
 
-    # Average metrics across batches
+                if args.use_wandb:
+                    # Log sample predictions
+                    wandb.log({
+                        'val/samples': [wandb.Image(
+                            visualizer.create_grid_image(
+                                sample_images[i],
+                                sample_masks[i],
+                                sample_outputs[i],
+                                f'Val Sample {i} - Epoch {epoch}'
+                            )
+                        ) for i in range(min(4, len(sample_images)))]
+                    })
+
+    # Calculate average metrics
     avg_metrics = {}
-    n_batches = len(all_metrics)
-
     for metric in all_metrics[0].keys():
-        if metric != 'confusion_matrix':
-            avg_metrics[metric] = sum(m[metric] for m in all_metrics) / n_batches
+        avg_metrics[metric] = sum(m.get(metric, 0) for m in all_metrics) / n_batches
 
-    # Sum confusion matrices
-    avg_metrics['confusion_matrix'] = sum(m['confusion_matrix'] for m in all_metrics)
+    return running_loss / n_batches, avg_metrics, (sample_images, sample_masks, sample_outputs)
 
-    return total_loss / len(loader), avg_metrics
-
-def train_one_epoch(model, loader, criterion, optimizer, device, n_classes, visualizer, epoch):
+def train_one_epoch(model, train_loader, criterion, optimizer, device, n_classes, visualizer, epoch):
+    """
+    Train model for one epoch
+    Args:
+        model: The neural network model
+        train_loader: DataLoader for training data
+        criterion: Loss function
+        optimizer: Optimizer
+        device: Device to train on (cuda/cpu)
+        n_classes: Number of classes
+        visualizer: SegmentationVisualizer instance
+        epoch: Current epoch number
+    """
     model.train()
-    total_loss = 0
+    running_loss = 0.0
     all_metrics = []
+    n_batches = len(train_loader)
 
-    with tqdm(loader) as pbar:
-        for batch_idx, (images, masks) in enumerate(pbar):
-            images = images.to(device)
-            masks = masks.to(device)
+    # Initialize progress bar
+    pbar = tqdm(train_loader, desc='Training')
 
-            optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, masks)
+    # Store sample visualizations for logging
+    sample_images = None
+    sample_masks = None
+    sample_outputs = None
 
-            loss.backward()
-            optimizer.step()
+    for batch_idx, (images, masks) in enumerate(pbar):
+        images = images.to(device)
+        masks = masks.to(device)
 
-            # Calculate metrics
-            batch_metrics = calculate_metrics(outputs, masks, n_classes)
-            all_metrics.append(batch_metrics)
+        # Forward pass
+        outputs = model(images)
+        loss = criterion(outputs, masks)
 
-            total_loss += loss.item()
+        # Backward pass and optimize
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
-            # Update progress bar
-            pbar.set_postfix({
-                'loss': loss.item(),
-                'dice': batch_metrics['dice'],
-                'iou': batch_metrics['iou']
-            })
+        # Calculate metrics
+        metrics = calculate_metrics(outputs.detach(), masks.detach(), n_classes)
+        all_metrics.append(metrics)
 
-            # Visualize first batch of each epoch
-            if batch_idx == 0:
-                visualizer.visualize_batch(images, masks, outputs,
-                                        phase='train', batch_idx=epoch)
+        # Update running loss
+        running_loss += loss.item()
 
-    # Average metrics across batches
+        # Update progress bar
+        pbar.set_postfix({
+            'loss': running_loss / (batch_idx + 1),
+            'iou': metrics['iou'],
+            'dice': metrics['dice']
+        })
+
+        # Store first batch for visualization
+        if batch_idx == 0:
+            sample_images = images.detach().cpu()
+            sample_masks = masks.detach().cpu()
+            sample_outputs = outputs.detach().cpu()
+            visualizer.visualize_batch(images, masks, outputs, phase='train', batch_idx=epoch)
+
+            if args.use_wandb:
+                # Log sample predictions
+                wandb.log({
+                    'train/samples': [wandb.Image(
+                        visualizer.create_grid_image(
+                            sample_images[i],
+                            sample_masks[i],
+                            sample_outputs[i],
+                            f'Train Sample {i} - Epoch {epoch}'
+                        )
+                    ) for i in range(min(4, len(sample_images)))]
+                })
+
+    # Calculate average metrics
     avg_metrics = {}
-    n_batches = len(all_metrics)
-
     for metric in all_metrics[0].keys():
-        if metric != 'confusion_matrix':
-            avg_metrics[metric] = sum(m[metric] for m in all_metrics) / n_batches
+        avg_metrics[metric] = sum(m.get(metric, 0) for m in all_metrics) / n_batches
 
-    # Sum confusion matrices
-    avg_metrics['confusion_matrix'] = sum(m['confusion_matrix'] for m in all_metrics)
-
-    return total_loss / len(loader), avg_metrics
+    return running_loss / n_batches, avg_metrics, (sample_images, sample_masks, sample_outputs)
 
 def plot_confusion_matrix(confusion_matrix, title='Confusion Matrix'):
     """Plot confusion matrix using matplotlib."""
@@ -173,7 +215,72 @@ def plot_confusion_matrix(confusion_matrix, title='Confusion Matrix'):
     plt.close(fig)
     return fig
 
+def test_model(model, test_loader, criterion, device, n_classes, visualizer):
+    """Test the model and visualize results"""
+    model.eval()
+    running_loss = 0.0
+    all_metrics = []
+    n_batches = len(test_loader)
+
+    sample_images = None
+    sample_masks = None
+    sample_outputs = None
+
+    with torch.no_grad():
+        for batch_idx, (images, masks) in enumerate(test_loader):
+            images = images.to(device)
+            masks = masks.to(device)
+
+            outputs = model(images)
+            loss = criterion(outputs, masks)
+
+            metrics = calculate_metrics(outputs, masks, n_classes)
+            all_metrics.append(metrics)
+
+            running_loss += loss.item()
+
+            if batch_idx == 0:
+                sample_images = images.detach().cpu()
+                sample_masks = masks.detach().cpu()
+                sample_outputs = outputs.detach().cpu()
+                visualizer.visualize_batch(images, masks, outputs, phase='test', batch_idx=0)
+
+                if args.use_wandb:
+                    # Log sample predictions
+                    wandb.log({
+                        'test/samples': [wandb.Image(
+                            visualizer.create_grid_image(
+                                sample_images[i],
+                                sample_masks[i],
+                                sample_outputs[i],
+                                f'Test Sample {i}'
+                            )
+                        ) for i in range(min(4, len(sample_images)))]
+                    })
+
+    # Calculate average metrics
+    avg_metrics = {}
+    for metric in all_metrics[0].keys():
+        avg_metrics[metric] = sum(m.get(metric, 0) for m in all_metrics) / n_batches
+
+    return running_loss / n_batches, avg_metrics, (sample_images, sample_masks, sample_outputs)
+
 def main(args):
+    # Create base directories if they don't exist
+    Path(args.data_dir).mkdir(parents=True, exist_ok=True)
+    Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
+
+    # Setup device and print GPU info
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if torch.cuda.is_available():
+        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+        # Set CUDA optimization flags
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
+    else:
+        print("CUDA is not available. Using CPU.")
+
     # Create datasets based on dataset choice first to get n_classes
     if args.dataset.lower() == 'kitti':
         train_loader, val_loader, test_loader = create_kitti_dataloaders(
@@ -243,9 +350,10 @@ def main(args):
 
     # Initialize model with appropriate number of classes
     model = UNet(n_channels=3, n_classes=n_classes).to(device)
-    print("Model: \n")
-    print(model)
 
+    print("Model architecture: \n")
+    print(model)
+    print("\n", "Device: ", device)
     if args.use_wandb:
         # Log model architecture
         wandb.watch(model, log='all', log_freq=100)
@@ -258,116 +366,130 @@ def main(args):
     # Initialize visualizer
     visualizer = SegmentationVisualizer(args.dataset)
 
-    # Training loop
+    # Training loop with mixed precision
+    print("Starting training...")
     best_val_iou = 0
     for epoch in range(args.epochs):
         print(f"\nEpoch {epoch+1}/{args.epochs}")
 
-        # Train
-        train_loss, train_metrics = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, n_classes,
-            visualizer, epoch
-        )
+        try:
+            # Train
+            train_loss, train_metrics, train_samples = train_one_epoch(
+                model, train_loader, criterion, optimizer, device, n_classes,
+                visualizer, epoch  # Pass visualizer and epoch
+            )
 
-        # Validate
-        val_loss, val_metrics = validate(
-            model, val_loader, criterion, device, n_classes,
-            visualizer, epoch
-        )
+            # Validate
+            val_loss, val_metrics, val_samples = validate(
+                model, val_loader, criterion, device, n_classes,
+                visualizer, epoch  # Pass visualizer and epoch
+            )
 
-        # Update learning rate
-        current_lr = optimizer.param_groups[0]['lr']
-        scheduler.step(val_loss)
-
-        if args.use_wandb:
-            # Enhanced metrics logging
-            wandb.log({
-                'epoch': epoch,
-                'learning_rate': current_lr,
-
-                # Loss metrics
-                'train/loss': train_loss,
-                'val/loss': val_loss,
-
-                # Training metrics
-                **{f'train/metrics/{k}': v for k, v in train_metrics.items()
-                   if k != 'confusion_matrix'},
-
-                # Validation metrics
-                **{f'val/metrics/{k}': v for k, v in val_metrics.items()
-                   if k != 'confusion_matrix'},
-
-                # Per-class metrics (if available)
-                **{f'train/class_metrics/{k}': v for k, v in train_metrics.items()
-                   if k.startswith('class_')},
-                **{f'val/class_metrics/{k}': v for k, v in val_metrics.items()
-                   if k.startswith('class_')},
-
-                # Learning rate
-                'train/learning_rate': current_lr,
-            })
-
-            # Log confusion matrices and visualizations
-            wandb.log({
-                'train/confusion_matrix': wandb.Image(
-                    plot_confusion_matrix(
-                        train_metrics['confusion_matrix'],
-                        title=f'Train Confusion Matrix - Epoch {epoch}'
-                    )
-                ),
-                'val/confusion_matrix': wandb.Image(
-                    plot_confusion_matrix(
-                        val_metrics['confusion_matrix'],
-                        title=f'Val Confusion Matrix - Epoch {epoch}'
-                    )
-                ),
-                'train/samples': [wandb.Image(str(p)) for p in (visualizer.base_dir / 'train').glob('*.png')],
-                'val/samples': [wandb.Image(str(p)) for p in (visualizer.base_dir / 'val').glob('*.png')]
-            })
-
-        # Save best model with more information
-        if val_metrics['iou'] > best_val_iou:
-            best_val_iou = val_metrics['iou']
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'val_iou': val_metrics['iou'],
-                'val_dice': val_metrics['dice'],
-                'val_loss': val_loss,
-                'train_loss': train_loss,
-                'args': vars(args)
-            }
-            save_path = Path(args.checkpoint_dir) / f'{args.dataset}-best_model.pth'
-            torch.save(checkpoint, save_path)
+            # Update learning rate
+            current_lr = optimizer.param_groups[0]['lr']
+            scheduler.step(val_loss)
 
             if args.use_wandb:
+                # Enhanced metrics logging
                 wandb.log({
-                    'best_model/epoch': epoch,
-                    'best_model/val_iou': val_metrics['iou'],
-                    'best_model/val_dice': val_metrics['dice'],
-                    'best_model/val_loss': val_loss
+                    'epoch': epoch,
+                    'learning_rate': current_lr,
+
+                    # Loss metrics
+                    'train/loss': train_loss,
+                    'val/loss': val_loss,
+
+                    # Training metrics
+                    **{f'train/metrics/{k}': v for k, v in train_metrics.items()
+                       if k not in ['confusion_matrix']},  # Skip confusion matrix for regular metrics
+
+                    # Validation metrics
+                    **{f'val/metrics/{k}': v for k, v in val_metrics.items()
+                       if k not in ['confusion_matrix']},  # Skip confusion matrix for regular metrics
+
+                    # Per-class metrics
+                    **{f'train/class_metrics/{k}': v for k, v in train_metrics.items()
+                       if k.startswith('class_')},
+                    **{f'val/class_metrics/{k}': v for k, v in val_metrics.items()
+                       if k.startswith('class_')},
+
+                    # Learning rate
+                    'train/learning_rate': current_lr,
                 })
-                # Save best model to wandb
-                wandb.save(str(save_path))
+
+                # Log confusion matrices separately
+                if 'confusion_matrix' in train_metrics:
+                    wandb.log({
+                        'train/confusion_matrix': wandb.Image(
+                            plot_confusion_matrix(
+                                train_metrics['confusion_matrix'],
+                                title=f'Train Confusion Matrix - Epoch {epoch}'
+                            )
+                        )
+                    })
+
+                if 'confusion_matrix' in val_metrics:
+                    wandb.log({
+                        'val/confusion_matrix': wandb.Image(
+                            plot_confusion_matrix(
+                                val_metrics['confusion_matrix'],
+                                title=f'Val Confusion Matrix - Epoch {epoch}'
+                            )
+                        )
+                    })
+
+            # Save best model with more information
+            if val_metrics['iou'] > best_val_iou:
+                best_val_iou = val_metrics['iou']
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'val_iou': val_metrics['iou'],
+                    'val_dice': val_metrics['dice'],
+                    'val_loss': val_loss,
+                    'train_loss': train_loss,
+                    'args': vars(args)
+                }
+                save_path = Path(args.checkpoint_dir) / f'{args.dataset}-best_model.pth'
+                torch.save(checkpoint, save_path)
+
+                if args.use_wandb:
+                    wandb.log({
+                        'best_model/epoch': epoch,
+                        'best_model/val_iou': val_metrics['iou'],
+                        'best_model/val_dice': val_metrics['dice'],
+                        'best_model/val_loss': val_loss
+                    })
+                    # Save best model to wandb
+                    wandb.save(str(save_path))
+
+        except Exception as e:
+            print(f"Error during training: {str(e)}")
+            if args.use_wandb:
+                wandb.finish()
+            raise
+
+    print("Training completed!")
 
     # Test best model
+    print("\nTesting best model...")
     model.load_state_dict(torch.load(Path(args.checkpoint_dir) / f'{args.dataset}-best_model.pth')['model_state_dict'])
-    test_loss, test_metrics = validate(model, test_loader, criterion, device, n_classes, visualizer, epoch='final')
+    test_loss, test_metrics, test_samples = test_model(
+        model, test_loader, criterion, device, n_classes, visualizer
+    )
 
     if args.use_wandb:
-        # Log test results
+        # Log final test results
         wandb.log({
-            'test/loss': test_loss,
-            **{f'test/metrics/{k}': v for k, v in test_metrics.items()
-               if k != 'confusion_matrix'},
-            **{f'test/class_metrics/{k}': v for k, v in test_metrics.items()
-               if k.startswith('class_')},
+            'test/final_loss': test_loss,
+            'test/final_iou': test_metrics['iou'],
+            'test/final_dice': test_metrics['dice'],
             'test/confusion_matrix': wandb.Image(
                 plot_confusion_matrix(
                     test_metrics['confusion_matrix'],
-                    title='Test Confusion Matrix'
+                    title='Final Test Confusion Matrix'
                 )
             )
         })
@@ -424,5 +546,7 @@ if __name__ == "__main__":
 
     # Create checkpoint directory
     Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     main(args)

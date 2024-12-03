@@ -121,3 +121,44 @@ class SegmentationVisualizer:
         except Exception as e:
             print(f"Error during visualization: {str(e)}")
             plt.close('all')  # Clean up any open figures
+
+    def create_grid_image(self, image, mask, output, title):
+        """Create a grid image for a single sample"""
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+        # Plot original image
+        img = image.permute(1, 2, 0)  # (C,H,W) -> (H,W,C)
+        img = self.denormalize_image(img.permute(2, 0, 1))
+        img = img.permute(1, 2, 0).numpy()
+        axes[0].imshow(img)
+        axes[0].set_title('Original Image')
+        axes[0].axis('off')
+
+        # Plot ground truth mask
+        mask = mask.numpy()
+        if self.dataset_name == 'spacenet':
+            axes[1].imshow(mask, cmap='binary')
+        else:
+            axes[1].imshow(mask, cmap=self.color_maps[self.dataset_name])
+        axes[1].set_title('Ground Truth')
+        axes[1].axis('off')
+
+        # Plot prediction
+        pred = torch.argmax(output, dim=0).numpy()
+        if self.dataset_name == 'spacenet':
+            axes[2].imshow(pred, cmap='binary')
+        else:
+            axes[2].imshow(pred, cmap=self.color_maps[self.dataset_name])
+        axes[2].set_title('Prediction')
+        axes[2].axis('off')
+
+        plt.suptitle(title)
+        plt.tight_layout()
+
+        # Convert plot to image
+        fig.canvas.draw()
+        img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        plt.close()
+
+        return img

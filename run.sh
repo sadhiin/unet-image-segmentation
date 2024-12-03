@@ -4,15 +4,15 @@
 # ##      |-kitti-dataset
 # ##          |-all kitti data
 
-# python train.py \
-#     --dataset kitti \
-#     --data_dir data \
-#     --image_size 256 \
-#     --batch_size 16 \
-#     --epochs 2 \
-#     --learning_rate 0.00001 \
-#     --num_workers 2 \
-#     --use_wandb
+python train.py \
+    --dataset kitti \
+    --data_dir data \
+    --image_size 256 \
+    --batch_size 16 \
+    --epochs 2 \
+    --learning_rate 0.00001 \
+    --num_workers 8 \
+    --use_wandb
 
 # ## -------------- For Experiment with CityScapes Dataset --------------
 # ## if the dataset is downloaded, then you can replace the data_dir with the path to the dataset as follows:
@@ -49,12 +49,27 @@
 # ## -- data
 # ##        |-coco
 # ##            |-....
-python train.py \
-    --dataset coco \
-    --data_dir data \
-    --image_size 256 \
-    --batch_size 16 \
-    --epochs 2 \
-    --learning_rate 0.0001 \
-    --num_workers 2 \
-    --use_wandb
+# python train.py \
+#     --dataset coco \
+#     --data_dir data \
+#     --image_size 256 \
+#     --batch_size 16 \
+#     --epochs 2 \
+#     --learning_rate 0.0001 \
+#     --num_workers 2 \
+#     --use_wandb
+
+# ## -------------- For Experiment with COCO Dataset --------------
+# ## if the dataset is downloaded, then you can replace the data_dir with the path to the dataset as follows:
+# ## -- data
+# ##        |-coco
+# ##            |-....
+# python train.py \
+#     --dataset spacenet \
+#     --data_dir data \
+#     --image_size 1024 \
+#     --batch_size 16 \
+#     --epochs 2 \
+#     --learning_rate 0.0001 \
+#     --num_workers 2 \
+#     --use_wandb

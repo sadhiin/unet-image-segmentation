@@ -4,7 +4,6 @@ import numpy as np
 import subprocess
 import pandas as pd
 import matplotlib.pyplot as plt
-import kaggle
 import torch
 from torch.utils.data import Dataset, random_split
 from torchvision import transforms
@@ -32,18 +31,18 @@ class KITTIDataset(Dataset):
     def download_and_prepare(cls, base_path="data"):
         """Download KITTI dataset using Kaggle API"""
         base_path = Path(base_path)
-        dataset_path = base_path / "kitti-dataset"
+        dataset_path = base_path / "kitti"
 
         if not dataset_path.exists():
-            print("Downloading KITTI dataset...")
-            kaggle.api.authenticate()
-            kaggle.api.dataset_download_files(
-                "klemenko/kitti-dataset",
-                path=str(dataset_path),
-                unzip=True
-            )
-            # setupkaggle()
-            # subprocess.run(f'kaggle datasets download klemenko/kitti-dataset -d {dataset_path} --unzip')
+            # print("Downloading KITTI dataset...")
+            # import kaggle
+            # kaggle.api.authenticate()
+            # kaggle.api.dataset_download_files(
+            #     "klemenko/kitti-dataset",
+            #     path=str(dataset_path),
+            #     unzip=True
+            # )
+            raise ValueError("KITTI dataset not found. Please download it manually. And the root folder should be named as kitti")
 
         # Setup paths
         label_path = dataset_path / "data_object_label_2/training/label_2"
@@ -119,7 +118,7 @@ class KITTIDataset(Dataset):
 
         image = cv2.imread(str(img_file))
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
+        print("image shape:", image.shape)
         fig, axes = plt.subplots(1, 3, figsize=(20, 8))
         axes[0].imshow(image)
         axes[0].set_title('Original Image')

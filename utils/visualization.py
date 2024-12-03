@@ -121,3 +121,33 @@ class SegmentationVisualizer:
         except Exception as e:
             print(f"Error during visualization: {str(e)}")
             plt.close('all')  # Clean up any open figures
+
+    def plot_confusion_matrix(self, cm, class_names):
+        """
+        Plot the confusion matrix.
+        Args:
+            cm: Confusion matrix
+            class_names: List of class names
+        """
+        fig, ax = plt.subplots(figsize=(10, 10))
+        cax = ax.matshow(cm, cmap='Blues')
+        plt.colorbar(cax)
+
+        ax.set_xticks(np.arange(len(class_names)))
+        ax.set_yticks(np.arange(len(class_names)))
+        ax.set_xticklabels(class_names, rotation=45, ha='right')
+        ax.set_yticklabels(class_names)
+
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        plt.title('Confusion Matrix')
+
+        # Loop over data dimensions and create text annotations.
+        for i in range(len(class_names)):
+            for j in range(len(class_names)):
+                ax.text(j, i, format(cm[i, j], 'd'),
+                        ha="center", va="center",
+                        color="white" if cm[i, j] > cm.max() / 2. else "black")
+
+        plt.tight_layout()
+        return fig

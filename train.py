@@ -21,59 +21,85 @@ from utils.visualization import SegmentationVisualizer
 device ='cuda' if torch.cuda.is_available() else 'cpu'
 
 def calculate_metrics(outputs, targets, n_classes):
-    """
-    Calculate evaluation metrics for multiclass image segmentation.
-    Args:
-        outputs (torch.Tensor): Model predictions (B, C, H, W)
-        targets (torch.Tensor): Ground truth labels (B, H, W)
-        n_classes (int): Number of classes
-    Returns:
-        dict: Dictionary containing various metrics
-    """
+    """Calculate segmentation metrics including per-class metrics"""
     # Move tensors to CPU for metric calculation
-    outputs = outputs.to(torch.device('cpu'))
-    targets = targets.to(torch.device('cpu'))
-
+    outputs = outputs.detach().cpu()
+    targets = targets.detach().cpu()
 
     # Get predictions
-    preds = torch.argmax(outputs, dim=1)
+    predictions = torch.argmax(outputs, dim=1)
 
-    # Initialize metrics with task='multiclass'
-    dice = Dice(num_classes=n_classes, average='macro')
-    iou = JaccardIndex(task="multiclass", num_classes=n_classes, average='macro')
-    precision = Precision(task="multiclass", num_classes=n_classes, average='macro')
-    recall = Recall(task="multiclass", num_classes=n_classes, average='macro')
-    f1 = F1Score(task="multiclass", num_classes=n_classes, average='macro')
-    confmat = ConfusionMatrix(task="multiclass", num_classes=n_classes)
+    # Initialize metrics dictionary
+    metrics = {}
 
-    # Calculate metrics
-    metrics = {
-        'dice': dice(preds, targets).item(),
-        'iou': iou(preds, targets).item(),
-        'precision': precision(preds, targets).item(),
-        'recall': recall(preds, targets).item(),
-        'f1_score': f1(preds, targets).item(),
-        'confusion_matrix': confmat(preds, targets).cpu().numpy()
-    }
+    # Calculate confusion matrix
+    conf_matrix = torch.zeros((n_classes, n_classes))
+    for t, p in zip(targets.view(-1), predictions.view(-1)):
+        conf_matrix[t.long(), p.long()] += 1
+    metrics['confusion_matrix'] = conf_matrix.numpy()
 
-    # Calculate per-class metrics
-    per_class_metrics = {}
-    for cls in range(n_classes):
-        cls_preds = (preds == cls)
-        cls_targets = (targets == cls)
+    # Calculate global metrics first
+    total_intersection = 0
+    total_union = 0
 
-        # Skip if class not present in ground truth
-        if not cls_targets.any():
-            continue
+    # Calculate per-class metrics only for classes present in this batch
+    present_classes = torch.unique(targets)
+    for class_id in range(n_classes):
+        # Create binary masks for current class
+        pred_mask = (predictions == class_id)
+        target_mask = (targets == class_id)
 
-        cls_dice = Dice(average='micro')(cls_preds, cls_targets).item()
-        cls_iou = JaccardIndex(task="binary")(cls_preds, cls_targets).item()
+        # Only calculate metrics if class is present in targets
+        if class_id in present_classes:
+            intersection = torch.logical_and(pred_mask, target_mask).sum().item()
+            union = torch.logical_or(pred_mask, target_mask).sum().item()
 
-        per_class_metrics[f'class_{cls}_dice'] = cls_dice
-        per_class_metrics[f'class_{cls}_iou'] = cls_iou
+            # Avoid division by zero
+            if union > 0:
+                iou = intersection / union
+                dice = 2 * intersection / (pred_mask.sum().item() + target_mask.sum().item() + 1e-10)
+            else:
+                iou = 0.0
+                dice = 0.0
 
-    metrics.update(per_class_metrics)
+            metrics[f'class_{class_id}_iou'] = iou
+            metrics[f'class_{class_id}_dice'] = dice
+
+            total_intersection += intersection
+            total_union += union
+
+    # Calculate mean metrics only for classes that appeared
+    metrics['iou'] = total_intersection / (total_union + 1e-10)
+    metrics['dice'] = 2 * total_intersection / (predictions.numel() + targets.numel() + 1e-10)
+
     return metrics
+
+def average_metrics(all_metrics, n_batches):
+    """
+    Average metrics across batches, handling missing classes
+    """
+    avg_metrics = {}
+    class_metrics_count = {}
+
+    # First pass: collect all metric keys and initialize counters
+    all_keys = set()
+    for metrics in all_metrics:
+        all_keys.update(metrics.keys())
+
+    # Second pass: sum up metrics and count occurrences
+    for key in all_keys:
+        if key == 'confusion_matrix':
+            # Sum up confusion matrices
+            avg_metrics[key] = sum(m[key] for m in all_metrics if key in m)
+        else:
+            # For other metrics, average only when present
+            values = [m[key] for m in all_metrics if key in m]
+            if values:  # Only average if we have values
+                avg_metrics[key] = sum(values) / len(values)
+            else:
+                avg_metrics[key] = 0.0  # Default value for missing metrics
+
+    return avg_metrics
 
 def validate(model, loader, criterion, device, n_classes, visualizer, epoch):
     model.eval()
@@ -112,12 +138,12 @@ def validate(model, loader, criterion, device, n_classes, visualizer, epoch):
 
     return total_loss / len(loader), avg_metrics
 
-def train_one_epoch(model, loader, criterion, optimizer, device, n_classes, visualizer, epoch):
+def train_one_epoch(model, train_loader, criterion, optimizer, device, n_classes, visualizer, epoch):
     model.train()
-    total_loss = 0
+    running_loss = 0.0
     all_metrics = []
 
-    with tqdm(loader) as pbar:
+    with tqdm(train_loader) as pbar:
         for batch_idx, (images, masks) in enumerate(pbar):
             images = images.to(device)
             masks = masks.to(device)
@@ -133,32 +159,24 @@ def train_one_epoch(model, loader, criterion, optimizer, device, n_classes, visu
             batch_metrics = calculate_metrics(outputs, masks, n_classes)
             all_metrics.append(batch_metrics)
 
-            total_loss += loss.item()
+            running_loss += loss.item()
 
-            # Update progress bar
+            # Update progress bar with current batch metrics
             pbar.set_postfix({
                 'loss': loss.item(),
                 'dice': batch_metrics['dice'],
                 'iou': batch_metrics['iou']
             })
 
-            # Visualize first batch of each epoch
+            # Visualize first batch
             if batch_idx == 0:
                 visualizer.visualize_batch(images, masks, outputs,
                                         phase='train', batch_idx=epoch)
 
     # Average metrics across batches
-    avg_metrics = {}
-    n_batches = len(all_metrics)
+    avg_metrics = average_metrics(all_metrics, len(train_loader))
 
-    for metric in all_metrics[0].keys():
-        if metric != 'confusion_matrix':
-            avg_metrics[metric] = sum(m[metric] for m in all_metrics) / n_batches
-
-    # Sum confusion matrices
-    avg_metrics['confusion_matrix'] = sum(m['confusion_matrix'] for m in all_metrics)
-
-    return total_loss / len(loader), avg_metrics
+    return running_loss / len(train_loader), avg_metrics
 
 def plot_confusion_matrix(confusion_matrix, title='Confusion Matrix'):
     """Plot confusion matrix using matplotlib."""

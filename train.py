@@ -104,7 +104,7 @@ def validate(model, loader, criterion, device, n_classes):
 def train_one_epoch(model, loader, criterion, optimizer, device, n_classes):
     model.train()
     total_loss = 0
-
+    
     with tqdm(loader) as pbar:
         for images, masks in pbar:
             images = images.to(device)

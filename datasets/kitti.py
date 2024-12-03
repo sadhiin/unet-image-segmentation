@@ -195,7 +195,7 @@ class KITTIDataset(Dataset):
 
 
 
-def create_kitti_dataloaders(base_path="data", batch_size=8, num_workers=4):
+def create_kitti_dataloaders(base_path="data", batch_size=8, num_workers=4, img_width=None, img_height=None):
     """Create train, validation, and test dataloaders"""
     # Download and prepare dataset
     image_path, label_path, df = KITTIDataset.download_and_prepare(base_path)
@@ -207,9 +207,14 @@ def create_kitti_dataloaders(base_path="data", batch_size=8, num_workers=4):
     test_df = temp_df.drop(val_df.index)
 
     # Create datasets
-    train_dataset = KITTIDataset(image_path, label_path, train_df, mode='train', augment=True)
-    val_dataset = KITTIDataset(image_path, label_path, val_df, mode='val', augment=False)
-    test_dataset = KITTIDataset(image_path, label_path, test_df, mode='test', augment=False)
+    if img_width is not None and img_height is not None:
+        train_dataset = KITTIDataset(image_path, label_path, train_df, mode='train', augment=True, target_size=(img_width, img_height))
+        val_dataset = KITTIDataset(image_path, label_path, val_df, mode='val', augment=False, target_size=(img_width, img_height))
+        test_dataset = KITTIDataset(image_path, label_path, test_df, mode='test', augment=False, target_size=(img_width, img_height))
+    else:
+        train_dataset = KITTIDataset(image_path, label_path, train_df, mode='train', augment=True)
+        val_dataset = KITTIDataset(image_path, label_path, val_df, mode='val', augment=False)
+        test_dataset = KITTIDataset(image_path, label_path, test_df, mode='test', augment=False)
 
     # Create dataloaders
     train_loader = torch.utils.data.DataLoader(

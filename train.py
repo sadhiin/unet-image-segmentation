@@ -155,7 +155,7 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, n_classes
             loss.backward()
             optimizer.step()
 
-            # Calculate metrics
+            # Calculate metrics [issue]
             batch_metrics = calculate_metrics(outputs, masks, n_classes)
             all_metrics.append(batch_metrics)
 

@@ -208,16 +208,17 @@ class CocoSegmentationDataset(Dataset):
 def create_coco_dataloaders(base_path, batch_size=8, num_workers=4):
     """Create train, validation and test dataloaders for COCO dataset."""
     if not os.path.exists(os.path.join(base_path,'coco2017')):
-        import kaggle
-        kaggle.api.authenticate()
-        kaggle.api.dataset_download_files(
-            'awsaf49/coco-2017-dataset',
-            path = base_path,
-            unzip=True
-        )
-        base_path = os.path.join(base_path,'coco2017')
-    else:
-        base_path = os.path.join(base_path,'coco2017')
+    #     import kaggle
+    #     kaggle.api.authenticate()
+    #     kaggle.api.dataset_download_files(
+    #         'awsaf49/coco-2017-dataset',
+    #         path = base_path,
+    #         unzip=True
+    #     )
+    #     base_path = os.path.join(base_path,'coco2017')
+    # else:
+    #     base_path = os.path.join(base_path,'coco2017')
+        raise ValueError("COCO dataset not found. Please download and extract the dataset manually. The root data folder should contain coco2017 folder.")
 
     # Define paths
     train_data_dir = os.path.join(base_path, "train2017")

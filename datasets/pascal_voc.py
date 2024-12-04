@@ -1,4 +1,5 @@
 import os
+from tracemalloc import is_tracing
 import cv2
 import numpy as np
 import torch
@@ -21,17 +22,38 @@ VOC_COLORMAP = [
 ]
 
 class VOCSegmentationDataset(Dataset):
-    def __init__(self, root, split='train', transform=None):
+    def __init__(self, root, is_train=True, transform=None):
         self.root = root
-        self.split = split
+        self.is_train = is_train
         self.transform = transform or self._default_transform()
 
         # Read split file
-        split_file = os.path.join(root, "ImageSets", "Segmentation", f"{split}.txt")
+        split_file = os.path.join(root, "ImageSets", "Segmentation", f"train.txt" if is_train else "val.txt")
+
         with open(split_file, mode='r') as f:
-            self.images = [line.strip() for line in f.readlines()]
+            image_names = [line.strip() for line in f.readlines()]
+
+        self.images_path = [os.path.join(root, "JPEGImages", f"{name}.jpg") for name in image_names]
+        self.masks_path = [os.path.join(root, "SegmentationClass", f"{name}.png") for name in image_names]
+
+        # Verify files exist
+        missing_files = []
+        for img_path, mask_path in zip(self.images_path, self.masks_path):
+            if not os.path.exists(img_path):
+                missing_files.append(f"Missing image: {img_path}")
+            if not os.path.exists(mask_path):
+                missing_files.append(f"Missing mask: {mask_path}")
+
+        if missing_files:
+            print("\nMissing files:")
+            for file in missing_files[:10]:  # Show first 10 missing files
+                print(file)
+            if len(missing_files) > 10:
+                print(f"... and {len(missing_files) - 10} more")
+            raise ValueError("Dataset files are missing")
 
         self.colormap2label = self._build_colormap2label()
+
 
     def _build_colormap2label(self):
         colormap2label = np.zeros(256 ** 3)
@@ -52,15 +74,21 @@ class VOCSegmentationDataset(Dataset):
         ])
 
     def __getitem__(self, idx):
-        img_name = self.images[idx]
-
+        # img_name = self.images[idx]
+        # mask_name = self.masks[idx]
+        # print(f"Image name: {img_name}")
+        # print(f"Mask name: {mask_name}")
         # Load image
-        img_path = os.path.join(self.root, "JPEGImages", f"{img_name}.jpg")
-        mask_path = os.path.join(self.root, "SegmentationClass", f"{img_name}.png")
+        img_path = self.images_path[idx]
+        mask_path = self.masks_path[idx]
 
         image = cv2.imread(img_path)
+        if image is None:
+            raise ValueError(f"Image not found at {img_path}")
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         mask = cv2.imread(mask_path)
+        if mask is None:
+            raise ValueError(f"Mask not found at {mask_path}")
         mask = cv2.cvtColor(mask, cv2.COLOR_BGR2RGB)
 
         # Convert mask to label indices
@@ -81,31 +109,26 @@ class VOCSegmentationDataset(Dataset):
         return image, mask
 
     def __len__(self):
-        return len(self.images)
+        return len(self.images_path)
 
 def create_voc_dataloaders(base_path, batch_size=8, num_workers=4):
     """Create train, validation and test dataloaders for Pascal VOC dataset."""
     data_dir = os.path.join(base_path, "pascal-voc")
     # Download dataset if not exists
     if not os.path.exists(data_dir):
-        print("Downloading Pascal VOC dataset...")
-        import kaggle
-        kaggle.api.authenticate()
-        kaggle.api.dataset_download_files(
-                "gopalbhattrai/pascal-voc-2012-dataset",
-                path=data_dir,
-                unzip=True
-            )
+        raise ValueError("Dataset not found")
+    else:
+        print(f"Dataset found at {data_dir}")
 
     # Create datasets
     train_dataset = VOCSegmentationDataset(
         root=os.path.join(data_dir,'VOC2012_train_val/VOC2012_train_val'),
-        split='train'
+        is_train=True
     )
 
     val_dataset = VOCSegmentationDataset(
-        root=os.path.join(data_dir,'VOC2012_test/VOC2012_test'),
-        split='test'
+        root=os.path.join(data_dir,'VOC2012_train_val/VOC2012_train_val'),
+        is_train=False
     )
 
     # Create dataloaders
@@ -132,3 +155,65 @@ def create_voc_dataloaders(base_path, batch_size=8, num_workers=4):
     )
 
     return train_loader, val_loader, test_loader
+
+# from torch.utils.data import random_split
+
+# def create_voc_dataloaders(base_path, batch_size=8, num_workers=4):
+#     """Create train, validation and test dataloaders for Pascal VOC dataset."""
+#     data_dir = os.path.join(base_path, "pascal-voc")
+#     # Download dataset if not exists
+#     if not os.path.exists(data_dir):
+#         raise ValueError("Dataset not found")
+#     else:
+#         print(f"Dataset found at {data_dir}")
+
+#     # Create datasets
+#     train_dataset = VOCSegmentationDataset(
+#         root=os.path.join(data_dir,'VOC2012_train_val/VOC2012_train_val'),
+#         is_train=True
+#     )
+
+#     # Create full validation dataset
+#     full_val_dataset = VOCSegmentationDataset(
+#         root=os.path.join(data_dir,'VOC2012_train_val/VOC2012_train_val'),
+#         is_train=False
+#     )
+
+#     # Split validation dataset into two equal parts
+#     total_val_size = len(full_val_dataset)
+#     val_size = test_size = total_val_size // 2
+
+#     val_dataset, test_dataset = random_split(
+#         full_val_dataset,
+#         [val_size, test_size],
+#         generator=torch.Generator().manual_seed(42)  # For reproducibility
+#     )
+
+#     print(f"Training set size: {len(train_dataset)}")
+#     print(f"Validation set size: {len(val_dataset)}")
+#     print(f"Test set size: {len(test_dataset)}")
+
+#     # Create dataloaders
+#     train_loader = DataLoader(
+#         train_dataset,
+#         batch_size=batch_size,
+#         shuffle=True,
+#         num_workers=num_workers
+#     )
+
+#     val_loader = DataLoader(
+#         val_dataset,
+#         batch_size=batch_size,
+#         shuffle=False,
+#         num_workers=num_workers
+#     )
+
+#     # Now using the separate test_dataset instead of val_dataset
+#     test_loader = DataLoader(
+#         test_dataset,
+#         batch_size=batch_size,
+#         shuffle=False,
+#         num_workers=num_workers
+#     )
+
+#     return train_loader, val_loader, test_loader

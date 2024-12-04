@@ -4,7 +4,6 @@ import numpy as np
 import subprocess
 import pandas as pd
 import matplotlib.pyplot as plt
-import kaggle
 import torch
 from torch.utils.data import Dataset, random_split
 from torchvision import transforms
@@ -32,18 +31,18 @@ class KITTIDataset(Dataset):
     def download_and_prepare(cls, base_path="data"):
         """Download KITTI dataset using Kaggle API"""
         base_path = Path(base_path)
-        dataset_path = base_path / "kitti-dataset"
+        dataset_path = base_path / "kitti"
 
         if not dataset_path.exists():
-            print("Downloading KITTI dataset...")
-            kaggle.api.authenticate()
-            kaggle.api.dataset_download_files(
-                "klemenko/kitti-dataset",
-                path=str(dataset_path),
-                unzip=True
-            )
-            # setupkaggle()
-            # subprocess.run(f'kaggle datasets download klemenko/kitti-dataset -d {dataset_path} --unzip')
+            # print("Downloading KITTI dataset...")
+            # import kaggle
+            # kaggle.api.authenticate()
+            # kaggle.api.dataset_download_files(
+            #     "klemenko/kitti-dataset",
+            #     path=str(dataset_path),
+            #     unzip=True
+            # )
+            raise ValueError("KITTI dataset not found. Please download it manually. And the root folder should be named as kitti")
 
         # Setup paths
         label_path = dataset_path / "data_object_label_2/training/label_2"
@@ -119,7 +118,7 @@ class KITTIDataset(Dataset):
 
         image = cv2.imread(str(img_file))
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
+        print("image shape:", image.shape)
         fig, axes = plt.subplots(1, 3, figsize=(20, 8))
         axes[0].imshow(image)
         axes[0].set_title('Original Image')
@@ -196,7 +195,7 @@ class KITTIDataset(Dataset):
 
 
 
-def create_kitti_dataloaders(base_path="data", batch_size=8, num_workers=4):
+def create_kitti_dataloaders(base_path="data", batch_size=8, num_workers=4, img_width=None, img_height=None):
     """Create train, validation, and test dataloaders"""
     # Download and prepare dataset
     image_path, label_path, df = KITTIDataset.download_and_prepare(base_path)
@@ -208,9 +207,14 @@ def create_kitti_dataloaders(base_path="data", batch_size=8, num_workers=4):
     test_df = temp_df.drop(val_df.index)
 
     # Create datasets
-    train_dataset = KITTIDataset(image_path, label_path, train_df, mode='train', augment=True)
-    val_dataset = KITTIDataset(image_path, label_path, val_df, mode='val', augment=False)
-    test_dataset = KITTIDataset(image_path, label_path, test_df, mode='test', augment=False)
+    if img_width is not None and img_height is not None:
+        train_dataset = KITTIDataset(image_path, label_path, train_df, mode='train', augment=True, target_size=(img_width, img_height))
+        val_dataset = KITTIDataset(image_path, label_path, val_df, mode='val', augment=False, target_size=(img_width, img_height))
+        test_dataset = KITTIDataset(image_path, label_path, test_df, mode='test', augment=False, target_size=(img_width, img_height))
+    else:
+        train_dataset = KITTIDataset(image_path, label_path, train_df, mode='train', augment=True)
+        val_dataset = KITTIDataset(image_path, label_path, val_df, mode='val', augment=False)
+        test_dataset = KITTIDataset(image_path, label_path, test_df, mode='test', augment=False)
 
     # Create dataloaders
     train_loader = torch.utils.data.DataLoader(

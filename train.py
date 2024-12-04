@@ -15,9 +15,10 @@ from tqdm import tqdm
 import wandb
 import numpy as np
 from torchmetrics import Dice, JaccardIndex, Precision, Recall, F1Score, ConfusionMatrix
+from utils.visualization import SegmentationVisualizer
 device ='cuda' if torch.cuda.is_available() else 'cpu'
 
-def calculate_metrics(outputs, targets, n_classes):
+def calculate_metrics(outputs, targets, n_classes, debug=False):
     """
     Calculate evaluation metrics for multiclass image segmentation.
     Args:
@@ -34,6 +35,14 @@ def calculate_metrics(outputs, targets, n_classes):
 
     # Get predictions
     preds = torch.argmax(outputs, dim=1)
+    if debug:
+        # Debug information
+        print("\nDebugging Metrics Calculation:")
+        print(f"Number of classes (n_classes): {n_classes}")
+        print(f"Unique values in predictions: {torch.unique(preds).tolist()}")
+        print(f"Unique values in targets: {torch.unique(targets).tolist()}")
+        print(f"Max prediction value: {preds.max().item()}")
+        print(f"Max target value: {targets.max().item()}")
 
     # Initialize metrics with task='multiclass'
     dice = Dice(num_classes=n_classes, average='macro')
@@ -75,39 +84,83 @@ def calculate_metrics(outputs, targets, n_classes):
 def validate(model, loader, criterion, device, n_classes):
     model.eval()
     total_loss = 0
-    all_metrics = []
+    all_outputs = []
+    all_targets = []
+    with tqdm(loader) as pbar:
+        with torch.no_grad():
+            for images, masks in pbar:
+                images = images.to(device)
+                masks = masks.to(device)
 
-    with torch.no_grad():
-        for images, masks in loader:
-            images = images.to(device)
-            masks = masks.to(device)
+                outputs = model(images)
+                loss = criterion(outputs, masks)
+                total_loss += loss.item()
 
-            outputs = model(images)
-            loss = criterion(outputs, masks)
+                # Store outputs and targets for later metric calculation
+                all_outputs.append(outputs.cpu())
+                all_targets.append(masks.cpu())
+    print('All outputs and targets collected. Calculating metrics...')
+    # Concatenate all batches
+    outputs = torch.cat(all_outputs, dim=0)
+    targets = torch.cat(all_targets, dim=0)
 
-            # Calculate metrics
-            batch_metrics = calculate_metrics(outputs, masks, n_classes)
-            all_metrics.append(batch_metrics)
+    # Calculate metrics once for the entire epoch
+    metrics = calculate_metrics(outputs, targets, n_classes)
 
-            total_loss += loss.item()
+    return total_loss / len(loader), metrics
 
-    # Average metrics across batches
-    avg_metrics = {}
-    n_batches = len(all_metrics)
+def validate_batch(model, loader, criterion, device, n_classes):
+    model.eval()
+    total_loss = 0
 
-    for metric in all_metrics[0].keys():
-        if metric != 'confusion_matrix':
-            avg_metrics[metric] = sum(m[metric] for m in all_metrics) / n_batches
+    # Initialize with empty metrics dictionary instead of None
+    total_metrics = {
+        'iou': 0,
+        'dice': 0,
+        'precision': 0,
+        'recall': 0,
+        'f1_score': 0,
+        'confusion_matrix': np.zeros((n_classes, n_classes))
+    }
+    # Initialize per-class metrics
+    for cls in range(n_classes):
+        total_metrics[f'class_{cls}_dice'] = 0
+        total_metrics[f'class_{cls}_iou'] = 0
 
-    # Sum confusion matrices
-    avg_metrics['confusion_matrix'] = sum(m['confusion_matrix'] for m in all_metrics)
+    batch_count = 0
 
-    return total_loss / len(loader), avg_metrics
+    with tqdm(loader) as pbar:
+        with torch.no_grad():
+            for images, masks in pbar:
+                images = images.to(device)
+                masks = masks.to(device)
+
+                outputs = model(images)
+                loss = criterion(outputs, masks)
+                total_loss += loss.item()
+
+                # Calculate metrics for current batch
+                batch_metrics = calculate_metrics(outputs, masks, n_classes)
+
+                # Accumulate metrics
+                for k, v in batch_metrics.items():
+                    if k != 'confusion_matrix':
+                        total_metrics[k] = (total_metrics[k] * batch_count + v) / (batch_count + 1)
+                total_metrics['confusion_matrix'] += batch_metrics['confusion_matrix']
+
+                batch_count += 1
+
+                # Update progress bar
+                pbar.set_postfix({'val_loss': loss.item()})
+
+    # Calculate average loss
+    avg_loss = total_loss / len(loader)
+
+    return avg_loss, total_metrics
 
 def train_one_epoch(model, loader, criterion, optimizer, device, n_classes):
     model.train()
     total_loss = 0
-    all_metrics = []
 
     with tqdm(loader) as pbar:
         for images, masks in pbar:
@@ -121,31 +174,12 @@ def train_one_epoch(model, loader, criterion, optimizer, device, n_classes):
             loss.backward()
             optimizer.step()
 
-            # Calculate metrics
-            batch_metrics = calculate_metrics(outputs, masks, n_classes)
-            all_metrics.append(batch_metrics)
-
             total_loss += loss.item()
 
-            # Update progress bar
-            pbar.set_postfix({
-                'loss': loss.item(),
-                'dice': batch_metrics['dice'],
-                'iou': batch_metrics['iou']
-            })
+            # Update progress bar with just the loss
+            pbar.set_postfix({'loss': loss.item()})
 
-    # Average metrics across batches
-    avg_metrics = {}
-    n_batches = len(all_metrics)
-
-    for metric in all_metrics[0].keys():
-        if metric != 'confusion_matrix':
-            avg_metrics[metric] = sum(m[metric] for m in all_metrics) / n_batches
-
-    # Sum confusion matrices
-    avg_metrics['confusion_matrix'] = sum(m['confusion_matrix'] for m in all_metrics)
-
-    return total_loss / len(loader), avg_metrics
+    return total_loss / len(loader)
 
 def main(args):
     # Setup device
@@ -203,21 +237,24 @@ def main(args):
     print("Model: \n")
     print(model)
     # Loss function and optimizer
+    print('Device: ', device)
 
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5)
+
+    visualizer = SegmentationVisualizer(args.dataset)
 
     # Training loop
     best_val_iou = 0
     for epoch in range(args.epochs):
         print(f"\nEpoch {epoch+1}/{args.epochs}")
 
-        # Train
-        train_loss, train_metrics = train_one_epoch(
+        # Train (now returns only loss)
+        train_loss = train_one_epoch(
             model, train_loader, criterion, optimizer, device, n_classes
         )
 
-        # Validate
+        # Validate (returns loss and metrics)
         val_loss, val_metrics = validate(
             model, val_loader, criterion, device, n_classes
         )
@@ -227,13 +264,7 @@ def main(args):
 
         # Print metrics
         print(f"Train Loss: {train_loss:.4f}")
-        print(f"Train Metrics: Dice={train_metrics['dice']:.4f}, "
-              f"IoU={train_metrics['iou']:.4f}, "
-              f"F1={train_metrics['f1_score']:.4f}")
         print(f"Val Loss: {val_loss:.4f}")
-        print(f"Val Metrics: Dice={val_metrics['dice']:.4f}, "
-              f"IoU={val_metrics['iou']:.4f}, "
-              f"F1={val_metrics['f1_score']:.4f}")
 
         if args.use_wandb:
             # Log metrics to wandb
@@ -241,20 +272,13 @@ def main(args):
                 'epoch': epoch,
                 'train_loss': train_loss,
                 'val_loss': val_loss,
-                **{f'train_{k}': v for k, v in train_metrics.items() if k != 'confusion_matrix'},
                 **{f'val_{k}': v for k, v in val_metrics.items() if k != 'confusion_matrix'},
                 'lr': optimizer.param_groups[0]['lr']
             })
 
-            # Log confusion matrices as images
-            wandb.log({
-                'train_confusion_matrix': wandb.Image(
-                    plot_confusion_matrix(train_metrics['confusion_matrix'])
-                ),
-                'val_confusion_matrix': wandb.Image(
-                    pair_confusion_matrix(val_metrics['confusion_matrix'])
-                )
-            })
+            # Plot and log confusion matrix
+            fig = visualizer.plot_confusion_matrix(val_metrics['confusion_matrix'], class_names=[f'class_{i}' for i in range(n_classes)])
+            wandb.log({'val_confusion_matrix': wandb.Image(fig)})
 
         # Save best model
         if val_metrics['iou'] > best_val_iou:

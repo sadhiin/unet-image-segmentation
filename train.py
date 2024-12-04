@@ -18,7 +18,7 @@ from torchmetrics import Dice, JaccardIndex, Precision, Recall, F1Score, Confusi
 from utils.visualization import SegmentationVisualizer
 device ='cuda' if torch.cuda.is_available() else 'cpu'
 
-def calculate_metrics(outputs, targets, n_classes, debug=True):
+def calculate_metrics(outputs, targets, n_classes, debug=False):
     """
     Calculate evaluation metrics for multiclass image segmentation.
     Args:
@@ -86,20 +86,20 @@ def validate(model, loader, criterion, device, n_classes):
     total_loss = 0
     all_outputs = []
     all_targets = []
+    with tqdm(loader) as pbar:
+        with torch.no_grad():
+            for images, masks in pbar:
+                images = images.to(device)
+                masks = masks.to(device)
 
-    with torch.no_grad():
-        for images, masks in loader:
-            images = images.to(device)
-            masks = masks.to(device)
+                outputs = model(images)
+                loss = criterion(outputs, masks)
+                total_loss += loss.item()
 
-            outputs = model(images)
-            loss = criterion(outputs, masks)
-            total_loss += loss.item()
-
-            # Store outputs and targets for later metric calculation
-            all_outputs.append(outputs.cpu())
-            all_targets.append(masks.cpu())
-
+                # Store outputs and targets for later metric calculation
+                all_outputs.append(outputs.cpu())
+                all_targets.append(masks.cpu())
+    print('All outputs and targets collected. Calculating metrics...')
     # Concatenate all batches
     outputs = torch.cat(all_outputs, dim=0)
     targets = torch.cat(all_targets, dim=0)
@@ -108,6 +108,55 @@ def validate(model, loader, criterion, device, n_classes):
     metrics = calculate_metrics(outputs, targets, n_classes)
 
     return total_loss / len(loader), metrics
+
+def validate_batch(model, loader, criterion, device, n_classes):
+    model.eval()
+    total_loss = 0
+
+    # Initialize with empty metrics dictionary instead of None
+    total_metrics = {
+        'iou': 0,
+        'dice': 0,
+        'precision': 0,
+        'recall': 0,
+        'f1_score': 0,
+        'confusion_matrix': np.zeros((n_classes, n_classes))
+    }
+    # Initialize per-class metrics
+    for cls in range(n_classes):
+        total_metrics[f'class_{cls}_dice'] = 0
+        total_metrics[f'class_{cls}_iou'] = 0
+
+    batch_count = 0
+
+    with tqdm(loader) as pbar:
+        with torch.no_grad():
+            for images, masks in pbar:
+                images = images.to(device)
+                masks = masks.to(device)
+
+                outputs = model(images)
+                loss = criterion(outputs, masks)
+                total_loss += loss.item()
+
+                # Calculate metrics for current batch
+                batch_metrics = calculate_metrics(outputs, masks, n_classes)
+
+                # Accumulate metrics
+                for k, v in batch_metrics.items():
+                    if k != 'confusion_matrix':
+                        total_metrics[k] = (total_metrics[k] * batch_count + v) / (batch_count + 1)
+                total_metrics['confusion_matrix'] += batch_metrics['confusion_matrix']
+
+                batch_count += 1
+
+                # Update progress bar
+                pbar.set_postfix({'val_loss': loss.item()})
+
+    # Calculate average loss
+    avg_loss = total_loss / len(loader)
+
+    return avg_loss, total_metrics
 
 def train_one_epoch(model, loader, criterion, optimizer, device, n_classes):
     model.train()

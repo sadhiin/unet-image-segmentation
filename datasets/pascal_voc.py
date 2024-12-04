@@ -116,14 +116,6 @@ def create_voc_dataloaders(base_path, batch_size=8, num_workers=4):
     data_dir = os.path.join(base_path, "pascal-voc")
     # Download dataset if not exists
     if not os.path.exists(data_dir):
-        # print("Downloading Pascal VOC dataset...")
-        # import kaggle
-        # kaggle.api.authenticate()
-        # kaggle.api.dataset_download_files(
-        #         "gopalbhattrai/pascal-voc-2012-dataset",
-        #         path=data_dir,
-        #         unzip=True
-        #     )
         raise ValueError("Dataset not found")
     else:
         print(f"Dataset found at {data_dir}")
@@ -163,3 +155,65 @@ def create_voc_dataloaders(base_path, batch_size=8, num_workers=4):
     )
 
     return train_loader, val_loader, test_loader
+
+# from torch.utils.data import random_split
+
+# def create_voc_dataloaders(base_path, batch_size=8, num_workers=4):
+#     """Create train, validation and test dataloaders for Pascal VOC dataset."""
+#     data_dir = os.path.join(base_path, "pascal-voc")
+#     # Download dataset if not exists
+#     if not os.path.exists(data_dir):
+#         raise ValueError("Dataset not found")
+#     else:
+#         print(f"Dataset found at {data_dir}")
+
+#     # Create datasets
+#     train_dataset = VOCSegmentationDataset(
+#         root=os.path.join(data_dir,'VOC2012_train_val/VOC2012_train_val'),
+#         is_train=True
+#     )
+
+#     # Create full validation dataset
+#     full_val_dataset = VOCSegmentationDataset(
+#         root=os.path.join(data_dir,'VOC2012_train_val/VOC2012_train_val'),
+#         is_train=False
+#     )
+
+#     # Split validation dataset into two equal parts
+#     total_val_size = len(full_val_dataset)
+#     val_size = test_size = total_val_size // 2
+
+#     val_dataset, test_dataset = random_split(
+#         full_val_dataset,
+#         [val_size, test_size],
+#         generator=torch.Generator().manual_seed(42)  # For reproducibility
+#     )
+
+#     print(f"Training set size: {len(train_dataset)}")
+#     print(f"Validation set size: {len(val_dataset)}")
+#     print(f"Test set size: {len(test_dataset)}")
+
+#     # Create dataloaders
+#     train_loader = DataLoader(
+#         train_dataset,
+#         batch_size=batch_size,
+#         shuffle=True,
+#         num_workers=num_workers
+#     )
+
+#     val_loader = DataLoader(
+#         val_dataset,
+#         batch_size=batch_size,
+#         shuffle=False,
+#         num_workers=num_workers
+#     )
+
+#     # Now using the separate test_dataset instead of val_dataset
+#     test_loader = DataLoader(
+#         test_dataset,
+#         batch_size=batch_size,
+#         shuffle=False,
+#         num_workers=num_workers
+#     )
+
+#     return train_loader, val_loader, test_loader

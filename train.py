@@ -18,7 +18,7 @@ from torchmetrics import Dice, JaccardIndex, Precision, Recall, F1Score, Confusi
 from utils.visualization import SegmentationVisualizer
 device ='cuda' if torch.cuda.is_available() else 'cpu'
 
-def calculate_metrics(outputs, targets, n_classes):
+def calculate_metrics(outputs, targets, n_classes, debug=True):
     """
     Calculate evaluation metrics for multiclass image segmentation.
     Args:
@@ -35,6 +35,14 @@ def calculate_metrics(outputs, targets, n_classes):
 
     # Get predictions
     preds = torch.argmax(outputs, dim=1)
+    if debug:
+        # Debug information
+        print("\nDebugging Metrics Calculation:")
+        print(f"Number of classes (n_classes): {n_classes}")
+        print(f"Unique values in predictions: {torch.unique(preds).tolist()}")
+        print(f"Unique values in targets: {torch.unique(targets).tolist()}")
+        print(f"Max prediction value: {preds.max().item()}")
+        print(f"Max target value: {targets.max().item()}")
 
     # Initialize metrics with task='multiclass'
     dice = Dice(num_classes=n_classes, average='macro')
@@ -104,7 +112,7 @@ def validate(model, loader, criterion, device, n_classes):
 def train_one_epoch(model, loader, criterion, optimizer, device, n_classes):
     model.train()
     total_loss = 0
-    
+
     with tqdm(loader) as pbar:
         for images, masks in pbar:
             images = images.to(device)

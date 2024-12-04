@@ -59,12 +59,24 @@ class CityscapesDataset(Dataset):
         # Convert label to tensor
         label = torch.from_numpy(label).long()
 
+        # print(f"\nDebugging CityscapesDataset item {index}:")
+        # print(f"Unique values in label: {torch.unique(label).tolist()}")
+        # print(f"Label shape: {label.shape}")
+
         return cityscape, label
 
     def _map_labels(self, label):
+        """Map labels to training IDs and ensure ignore class exists"""
         label_copy = np.zeros(label.shape[:2], dtype=np.int64)
+
+        # Map known classes
         for k, v in self.id_to_trainid.items():
             label_copy[label[:,:,0] == k] = v
+
+        # Ensure there's at least one ignore pixel (in a non-visible corner)
+        if 255 not in np.unique(label_copy):
+            label_copy[0, 0] = 255  # Set top-left pixel to ignore class
+
         return label_copy
 
     def _split_image(self, image):
@@ -83,15 +95,16 @@ def create_cityscapes_dataloaders(base_path, batch_size=8, num_workers=4):
     # Load all image files
 
     if not os.path.exists(os.path.join(base_path, 'cityscapes_data')):
-        print('Downloading the Citispace datasets')
-        import kaggle
-        kaggle.api.authenticate()
-        kaggle.api.dataset_download_files(
-                "dansbecker/cityscapes-image-pairs",
-                path=str(base_path),
-                unzip=True
-            )
-        data_dir = os.path.join(base_path, 'cityscapes_data')
+        # print('Downloading the Citispace datasets')
+        # import kaggle
+        # kaggle.api.authenticate()
+        # kaggle.api.dataset_download_files(
+        #         "dansbecker/cityscapes-image-pairs",
+        #         path=str(base_path),
+        #         unzip=True
+        #     )
+        # data_dir = os.path.join(base_path, 'cityscapes_data')
+        raise ValueError("Citispace data is not downloaded. Please download the data.")
     else:
         print("Citispace data is previously downloaded...!")
         data_dir = os.path.join(base_path, 'cityscapes_data')
@@ -139,12 +152,12 @@ def create_cityscapes_dataloaders(base_path, batch_size=8, num_workers=4):
     )
 
     # Debug: Print unique label values
-    sample_batch = next(iter(train_loader))
-    images, labels = sample_batch
-    print(f"Unique label values: {torch.unique(labels)}")
-    print(f"Label shape: {labels.shape}")
-    print(f"Min label value: {labels.min()}")
-    print(f"Max label value: {labels.max()}")
+    # sample_batch = next(iter(train_loader))
+    # images, labels = sample_batch
+    # print(f"Unique label values: {torch.unique(labels)}")
+    # print(f"Label shape: {labels.shape}")
+    # print(f"Min label value: {labels.min()}")
+    # print(f"Max label value: {labels.max()}")
 
     return train_loader, val_loader, test_loader
 

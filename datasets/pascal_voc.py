@@ -29,9 +29,29 @@ class VOCSegmentationDataset(Dataset):
         # Read split file
         split_file = os.path.join(root, "ImageSets", "Segmentation", f"{split}.txt")
         with open(split_file, mode='r') as f:
-            self.images = [line.strip() for line in f.readlines()]
+            image_names = [line.strip() for line in f.readlines()]
+
+        self.images = [os.path.join(root, "JPEGImages", f"{name}.jpg") for name in image_names]
+        self.masks = [os.path.join(root, "SegmentationClass", f"{name}.png") for name in image_names]
+
+        # Verify files exist
+        missing_files = []
+        for img_path, mask_path in zip(self.images, self.masks):
+            if not os.path.exists(img_path):
+                missing_files.append(f"Missing image: {img_path}")
+            if not os.path.exists(mask_path):
+                missing_files.append(f"Missing mask: {mask_path}")
+
+        if missing_files:
+            print("\nMissing files:")
+            for file in missing_files[:10]:  # Show first 10 missing files
+                print(file)
+            if len(missing_files) > 10:
+                print(f"... and {len(missing_files) - 10} more")
+            raise ValueError("Dataset files are missing")
 
         self.colormap2label = self._build_colormap2label()
+
 
     def _build_colormap2label(self):
         colormap2label = np.zeros(256 ** 3)
@@ -59,8 +79,12 @@ class VOCSegmentationDataset(Dataset):
         mask_path = os.path.join(self.root, "SegmentationClass", f"{img_name}.png")
 
         image = cv2.imread(img_path)
+        if image is None:
+            raise ValueError(f"Image not found at {img_path}")
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         mask = cv2.imread(mask_path)
+        if mask is None:
+            raise ValueError(f"Mask not found at {mask_path}")
         mask = cv2.cvtColor(mask, cv2.COLOR_BGR2RGB)
 
         # Convert mask to label indices

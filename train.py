@@ -28,9 +28,8 @@ def calculate_metrics(outputs, targets, n_classes, debug=False):
     Returns:
         dict: Dictionary containing various metrics
     """
-    # Move tensors to CPU for metric calculation
-    outputs = outputs.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-    targets = targets.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+    # outputs = outputs.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+    # targets = targets.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
 
 
     # Get predictions
@@ -151,7 +150,7 @@ def validate_batch(model, loader, criterion, device, n_classes):
                 batch_count += 1
 
                 # Update progress bar
-                pbar.set_postfix({'val_loss': loss.item()})
+                pbar.set_postfix({'val_loss': loss.item(), 'val_iou': total_metrics['iou']})
     torch.cuda.empty_cache()
     # Calculate average loss
     avg_loss = total_loss / len(loader)

@@ -1,3 +1,4 @@
+from pkgutil import get_loader
 from sys import argv
 from sklearn.metrics import pair_confusion_matrix
 import torch
@@ -174,11 +175,11 @@ def train_one_epoch(model, loader, criterion, optimizer, device, n_classes):
             optimizer.step()
 
             total_loss += loss.item()
-
+            val_loss, train_metricss = validate_batch(model, loader, criterion, device, n_classes)
             # Update progress bar with just the loss
             pbar.set_postfix({'loss': loss.item()})
     torch.cuda.empty_cache()
-    return total_loss / len(loader)
+    return total_loss / len(loader), train_metricss
 
 def main(args):
     # Setup device

@@ -29,8 +29,8 @@ def calculate_metrics(outputs, targets, n_classes, debug=False):
         dict: Dictionary containing various metrics
     """
     # Move tensors to CPU for metric calculation
-    outputs = outputs.to(torch.device('cpu'))
-    targets = targets.to(torch.device('cpu'))
+    outputs = outputs.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+    targets = targets.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
 
 
     # Get predictions
@@ -61,7 +61,7 @@ def calculate_metrics(outputs, targets, n_classes, debug=False):
         'f1_score': f1(preds, targets).item(),
         'confusion_matrix': confmat(preds, targets).cpu().numpy()
     }
-
+    torch.cuda.empty_cache()
     # Calculate per-class metrics
     per_class_metrics = {}
     for cls in range(n_classes):
@@ -106,7 +106,7 @@ def validate(model, loader, criterion, device, n_classes):
 
     # Calculate metrics once for the entire epoch
     metrics = calculate_metrics(outputs, targets, n_classes)
-
+    torch.cuda.empty_cache()
     return total_loss / len(loader), metrics
 
 def validate_batch(model, loader, criterion, device, n_classes):
@@ -152,7 +152,7 @@ def validate_batch(model, loader, criterion, device, n_classes):
 
                 # Update progress bar
                 pbar.set_postfix({'val_loss': loss.item()})
-
+    torch.cuda.empty_cache()
     # Calculate average loss
     avg_loss = total_loss / len(loader)
 
@@ -178,7 +178,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, n_classes):
 
             # Update progress bar with just the loss
             pbar.set_postfix({'loss': loss.item()})
-
+    torch.cuda.empty_cache()
     return total_loss / len(loader)
 
 def main(args):

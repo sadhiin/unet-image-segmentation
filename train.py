@@ -29,12 +29,9 @@ def calculate_metrics(outputs, targets, n_classes, debug=False):
     Returns:
         dict: Dictionary containing various metrics
     """
-    # outputs = outputs.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-    # targets = targets.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-
-
     # Get predictions
     preds = torch.argmax(outputs, dim=1)
+    valid_mask = targets != 255
     if debug:
         # Debug information
         print("\nDebugging Metrics Calculation:")
@@ -45,12 +42,12 @@ def calculate_metrics(outputs, targets, n_classes, debug=False):
         print(f"Max target value: {targets.max().item()}")
 
     # Initialize metrics with task='multiclass'
-    dice = Dice(num_classes=n_classes, average='macro')
-    iou = JaccardIndex(task="multiclass", num_classes=n_classes, average='macro')
-    precision = Precision(task="multiclass", num_classes=n_classes, average='macro')
-    recall = Recall(task="multiclass", num_classes=n_classes, average='macro')
-    f1 = F1Score(task="multiclass", num_classes=n_classes, average='macro')
-    confmat = ConfusionMatrix(task="multiclass", num_classes=n_classes)
+    dice = Dice(num_classes=n_classes, average='macro').to(device)
+    iou = JaccardIndex(task="multiclass", num_classes=n_classes, average='macro').to(device)
+    precision = Precision(task="multiclass", num_classes=n_classes, average='macro').to(device)
+    recall = Recall(task="multiclass", num_classes=n_classes, average='macro').to(device)
+    f1 = F1Score(task="multiclass", num_classes=n_classes, average='macro').to(device)
+    confmat = ConfusionMatrix(task="multiclass", num_classes=n_classes).to(device)
 
     # Calculate metrics
     metrics = {
@@ -63,17 +60,20 @@ def calculate_metrics(outputs, targets, n_classes, debug=False):
     }
     torch.cuda.empty_cache()
     # Calculate per-class metrics
+    targets = targets.long()
     per_class_metrics = {}
-    for cls in range(n_classes):
-        cls_preds = (preds == cls)
-        cls_targets = (targets == cls)
+    dice_metric = Dice(average='micro').to(device)
+    iou_metric = JaccardIndex(task="binary").to(device)
 
-        # Skip if class not present in ground truth
+    for cls in range(n_classes):
+        cls_preds = (outputs.argmax(dim=1) == cls).float().to(device)
+        cls_targets = (targets == cls).float().to(device)
+
         if not cls_targets.any():
             continue
-
-        cls_dice = Dice(average='micro')(cls_preds, cls_targets).item()
-        cls_iou = JaccardIndex(task="binary")(cls_preds, cls_targets).item()
+        cls_targets= cls_targets.long()
+        cls_dice = dice_metric(cls_preds, cls_targets).item()
+        cls_iou = iou_metric(cls_preds, cls_targets).item()
 
         per_class_metrics[f'class_{cls}_dice'] = cls_dice
         per_class_metrics[f'class_{cls}_iou'] = cls_iou
@@ -97,8 +97,8 @@ def validate(model, loader, criterion, device, n_classes):
                 total_loss += loss.item()
 
                 # Store outputs and targets for later metric calculation
-                all_outputs.append(outputs.cpu())
-                all_targets.append(masks.cpu())
+                all_outputs.append(outputs)
+                all_targets.append(masks)
     print('All outputs and targets collected. Calculating metrics...')
     # Concatenate all batches
     outputs = torch.cat(all_outputs, dim=0)
@@ -140,6 +140,7 @@ def validate_batch(model, loader, criterion, device, n_classes):
                 total_loss += loss.item()
 
                 # Calculate metrics for current batch
+                masks = masks.long()
                 batch_metrics = calculate_metrics(outputs, masks, n_classes)
 
                 # Accumulate metrics
@@ -151,7 +152,12 @@ def validate_batch(model, loader, criterion, device, n_classes):
                 batch_count += 1
 
                 # Update progress bar
-                pbar.set_postfix({'val_loss': loss.item(), 'val_iou': total_metrics['iou']})
+                pbar.set_postfix({'val_loss': loss.item(), 
+                                  'val_iou': total_metrics['iou'],
+                                  'val_dice': total_metrics['dice'],
+                                  'val_precision': total_metrics['precision'],
+                                  'val_recall': total_metrics['recall'],
+                                  'val_f1_score': total_metrics['f1_score']})
     torch.cuda.empty_cache()
     # Calculate average loss
     avg_loss = total_loss / len(loader)
@@ -161,7 +167,17 @@ def validate_batch(model, loader, criterion, device, n_classes):
 def train_one_epoch(model, loader, criterion, optimizer, device, n_classes):
     model.train()
     total_loss = 0
-
+    total_metrics = {
+        'dice': 0,
+        'iou': 0,
+        'precision': 0,
+        'recall': 0,
+        'f1_score': 0
+    }
+    batch_count = 0
+    for cls in range(n_classes):
+        total_metrics[f'class_{cls}_dice'] = 0
+        total_metrics[f'class_{cls}_iou'] = 0
     with tqdm(loader) as pbar:
         for images, masks in pbar:
             images = images.to(device)
@@ -173,13 +189,23 @@ def train_one_epoch(model, loader, criterion, optimizer, device, n_classes):
 
             loss.backward()
             optimizer.step()
-
+            masks = masks.long()
+            batch_metrics = calculate_metrics(outputs, masks, n_classes)
+            for k, v in batch_metrics.items():
+                if k in total_metrics:
+                    total_metrics[k] = (total_metrics[k] * batch_count + v) / (batch_count + 1)
+                else:
+                    total_metrics[k] += v
             total_loss += loss.item()
-            val_loss, train_metricss = validate_batch(model, loader, criterion, device, n_classes)
+
             # Update progress bar with just the loss
-            pbar.set_postfix({'loss': loss.item()})
+            pbar.set_postfix({'loss': loss.item(), 'train_dice': total_metrics['dice'],
+                            'train_iou': total_metrics['iou'], 
+                            'train_precision': total_metrics['precision'],
+                            'train_recall': total_metrics['recall'],
+                            'train_f1_score': total_metrics['f1_score']})
     torch.cuda.empty_cache()
-    return total_loss / len(loader), train_metricss
+    return total_loss / len(loader), total_metrics
 
 def main(args):
     # Setup device

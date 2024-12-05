@@ -31,7 +31,10 @@ def calculate_metrics(outputs, targets, n_classes, debug=False):
     """
     # Get predictions
     preds = torch.argmax(outputs, dim=1)
-    valid_mask = targets != 255
+    # valid_mask = targets != 255
+    # preds = preds[valid_mask]
+    # targets = targets[valid_mask]
+    
     if debug:
         # Debug information
         print("\nDebugging Metrics Calculation:")
@@ -195,7 +198,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, n_classes):
                 if k in total_metrics:
                     total_metrics[k] = (total_metrics[k] * batch_count + v) / (batch_count + 1)
                 else:
-                    total_metrics[k] += v
+                    total_metrics[k] = v
             total_loss += loss.item()
 
             # Update progress bar with just the loss

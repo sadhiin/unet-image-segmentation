@@ -45,15 +45,15 @@ def create_cityscapes_dataloaders(base_path, batch_size=8, num_workers=4):
     # Load all image files
 
     if not os.path.exists(os.path.join(base_path, 'cityscapes_data')):
-        print('Downloading the Citispace datasets')
-        import kaggle
-        kaggle.api.authenticate()
-        kaggle.api.dataset_download_files(
-                "dansbecker/cityscapes-image-pairs",
-                path=str(base_path),
-                unzip=True
-            )
-        data_dir = os.path.join(base_path, 'cityscapes_data')
+        # print('Downloading the Citispace datasets')
+        # import kaggle
+        # kaggle.api.authenticate()
+        # kaggle.api.dataset_download_files(
+        #         "dansbecker/cityscapes-image-pairs",
+        #         path=str(base_path),
+        #         unzip=True
+        #     )
+        # data_dir = os.path.join(base_path, 'cityscapes_data')
         raise ValueError("Citispace data is not downloaded. Please download the data.")
     else:
         print("Citispace data is previously downloaded...!")

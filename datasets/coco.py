@@ -10,46 +10,22 @@ from tqdm import tqdm
 
 class CocoSegmentationDataset(Dataset):
     def __init__(self, root_dir, annotation_file, transform=None, is_train=True,
-                 max_cache_size=1000, image_size=256, pregenerate_masks=False):
-        """
-        Args:
-            root_dir: Directory with all the images
-            annotation_file: Path to COCO annotation file
-            transform: Optional transform to be applied
-            is_train: Whether this is training set (for augmentations)
-            max_cache_size: Maximum number of masks to cache
-            image_size: Size to resize images to
-            pregenerate_masks: Whether to pregenerate all masks
-        """
+                 max_cache_size=1000, image_size=256, pregenerate_masks=True):
         self.root_dir = root_dir
-        self.image_size = image_size
+        self.coco = COCO(annotation_file)
+        self.ids = list(self.coco.imgToAnns.keys())
         self.is_train = is_train
-        self.transform = transform or self._default_transform()
         self.max_cache_size = max_cache_size
-
-        # Initialize COCO api
-        try:
-            self.coco = COCO(annotation_file)
-            self.ids = list(sorted(self.coco.imgs.keys()))
-        except Exception as e:
-            raise RuntimeError(f"Error loading COCO annotations: {str(e)}")
-
-        # Setup categories
-        self.categories = self.coco.loadCats(self.coco.getCatIds())
-        self.categories.sort(key=lambda x: x['id'])
-        self.num_classes = len(self.categories) + 1  # +1 for background
-        self.continuous_cat_id = {v['id']: i + 1 for i, v in enumerate(self.categories)}
-
-        # Setup mask caching
-        self.mask_dir = Path(os.path.dirname(root_dir)) / 'masks'
+        self.image_size = image_size
+        self.pregenerate_masks = pregenerate_masks
+        self.transform = transform or self._default_transform()
+        self.image_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                               std=[0.229, 0.224, 0.225])
+        ])
+        self.mask_dir = Path(root_dir) / 'masks'
         self.mask_dir.mkdir(parents=True, exist_ok=True)
-
-        # Pregenerate masks if requested
-        if pregenerate_masks:
-            self.generate_all_masks()
-
-        # Clean old cache if necessary
-        self._clean_old_cache()
 
     def _default_transform(self):
         """Default transformation with optional augmentation"""
@@ -58,16 +34,9 @@ class CocoSegmentationDataset(Dataset):
                 transforms.RandomHorizontalFlip(),
                 transforms.RandomRotation(10),
                 transforms.ColorJitter(brightness=0.2, contrast=0.2),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                  std=[0.229, 0.224, 0.225])
             ])
         else:
-            return transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                  std=[0.229, 0.224, 0.225])
-            ])
+            return None
 
     def _clean_old_cache(self):
         """Clean old cache files if exceeding max size"""
@@ -141,52 +110,33 @@ class CocoSegmentationDataset(Dataset):
 
     def __getitem__(self, index):
         try:
-            # Load image
             img_id = self.ids[index]
-            img_metadata = self.coco.loadImgs(img_id)[0]
-            image_path = os.path.join(self.root_dir, img_metadata['file_name'])
-
-            if not os.path.exists(image_path):
-                raise FileNotFoundError(f"Image not found: {image_path}")
-
-            image = Image.open(image_path)
-
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-
-            # Load or generate mask with explicit dimensions
-            original_height = img_metadata['height']
-            original_width = img_metadata['width']
-
-            mask = self._load_or_generate_mask(
-                img_id,
-                original_height,
-                original_width
-            )
-
-            # Verify mask was loaded/generated correctly
-            if mask is None or mask.shape != (original_height, original_width):
-                print(f"Invalid mask shape for image {img_id}. Expected {(original_height, original_width)}, got {mask.shape if mask is not None else None}")
-                mask = np.zeros((original_height, original_width), dtype=np.uint8)
-
-            # Resize to fixed size
+            ann_ids = self.coco.getAnnIds(imgIds=img_id)
+            anns = self.coco.loadAnns(ann_ids)
+            path = self.coco.loadImgs(img_id)[0]['file_name']
+            image = Image.open(os.path.join(self.root_dir, path)).convert('RGB')
+            mask = self.coco.annToMask(anns[0])
+            for i in range(len(anns) - 1):
+                mask += self.coco.annToMask(anns[i + 1])
             image = image.resize((self.image_size, self.image_size), Image.BILINEAR)
             mask = Image.fromarray(mask.astype(np.uint8)).resize((self.image_size, self.image_size), Image.NEAREST)
-            mask = np.array(mask)
 
-            # Apply transforms
             if self.transform is not None:
+                seed = torch.randint(0, 2**32, (1,))[0].item()
+                torch.manual_seed(seed)
                 image = self.transform(image)
+                torch.manual_seed(seed)
+                mask = self.transform(mask)
 
-            # Convert mask to tensor
-            mask = torch.from_numpy(mask).long()
+            image = self.image_transform(image)
+            mask = torch.from_numpy(np.array(mask)).long()
 
             return image, mask
 
         except Exception as e:
             print(f"Error loading sample {index}: {str(e)}")
-            # Return a dummy sample
-            return torch.zeros((3, self.image_size, self.image_size)), torch.zeros((self.image_size, self.image_size), dtype=torch.long)
+            return torch.zeros((3, self.image_size, self.image_size)), \
+                   torch.zeros((self.image_size, self.image_size), dtype=torch.long)
 
     def __len__(self):
         return len(self.ids)
